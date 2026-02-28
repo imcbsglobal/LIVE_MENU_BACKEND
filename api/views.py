@@ -471,14 +471,32 @@ def create_user(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # ── Company must already exist ─────────────────────────────────────────
-    try:
-        company = CompanyInfo.objects.get(client_id=client_id, is_active=True)
-    except CompanyInfo.DoesNotExist:
+    # ── Get or auto-create the company ─────────────────────────────
+    firm_name = request.data.get('firm_name', '').strip()
+    place     = request.data.get('place', '').strip()
+
+    company, created = CompanyInfo.objects.get_or_create(
+        client_id=client_id,
+        defaults={
+            'firm_name': firm_name or client_id,
+            'place':     place or '',
+            'is_active': True,
+        }
+    )
+
+    if not created and not company.is_active:
         return Response(
-            {'success': False, 'message': 'Company not found for this client_id.'},
-            status=status.HTTP_404_NOT_FOUND
+            {'success': False, 'message': 'This company account is inactive. Contact your administrator.'},
+            status=status.HTTP_403_FORBIDDEN
         )
+
+    # Update firm_name/place if provided and fields are currently empty
+    if not created and (firm_name or place):
+        if firm_name and not company.firm_name:
+            company.firm_name = firm_name
+        if place and not company.place:
+            company.place = place
+        company.save()
 
     # ── Username must be unique ────────────────────────────────────────────
     if AppUser.objects.filter(username=username).exists():
@@ -501,6 +519,87 @@ def create_user(request):
     return Response({
         'success': True,
         'message': f'Waiter "{full_name}" created successfully.',
+        'user': {
+            'id':        user.id,
+            'username':  user.username,
+            'full_name': user.full_name,
+            'user_type': user.user_type,
+            'client_id': company.client_id,
+            'firm_name': company.firm_name,
+            'place':     company.place,
+            'is_active': user.is_active,
+        }
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+def create_test_user(request):
+    """
+    FOR TESTING ONLY — Create a user with a manually specified Client ID.
+
+    Unlike create_user, this endpoint:
+      - Always creates (or reuses) a CompanyInfo for the given client_id
+      - Allows any firm_name and place to be specified manually
+      - Does NOT require the client_id to exist in the licensing system
+      - Sets user_type='admin' so the test user can log in as a company admin
+
+    Required payload:
+        client_id  – any string (e.g. TEST001)
+        username   – must be globally unique
+        password   – plain text, will be hashed
+        firm_name  – name for the company (auto-created if needed)
+        place      – place for the company
+    """
+    client_id = request.data.get('client_id', '').strip()
+    username  = request.data.get('username', '').strip()
+    password  = request.data.get('password', '')
+    firm_name = request.data.get('firm_name', '').strip()
+    place     = request.data.get('place', '').strip()
+    full_name = request.data.get('full_name', '').strip() or username
+
+    if not client_id:
+        return Response({'success': False, 'message': 'client_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not username:
+        return Response({'success': False, 'message': 'Username is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not password:
+        return Response({'success': False, 'message': 'Password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Force-create or update the company — no licensing check
+    company, created = CompanyInfo.objects.get_or_create(
+        client_id=client_id,
+        defaults={
+            'firm_name': firm_name or client_id,
+            'place':     place or 'Test',
+            'is_active': True,
+        }
+    )
+    # Always update firm_name/place if provided
+    if firm_name:
+        company.firm_name = firm_name
+    if place:
+        company.place = place
+    company.is_active = True
+    company.save()
+
+    if AppUser.objects.filter(username=username).exists():
+        return Response({
+            'success': False,
+            'message': f'Username "{username}" is already taken. Choose a different one.'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    user = AppUser.objects.create(
+        company   = company,
+        username  = username,
+        password  = make_password(password),
+        full_name = full_name,
+        user_type = 'admin',
+        is_active = True,
+    )
+
+    return Response({
+        'success':  True,
+        'message':  f'Test user "{username}" created successfully.',
+        'is_test':  True,
         'user': {
             'id':        user.id,
             'username':  user.username,
