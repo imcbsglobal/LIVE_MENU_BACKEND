@@ -33,7 +33,7 @@ print(f"[settings] DB_NAME     = {os.getenv('DB_NAME')}")
 # ============================================
 SECRET_KEY = 'django-insecure-g1@x=5suku6)8_2!8w4*a6*_f*t03__r)l1we=-xm80nit-@1d'
 DEBUG = True
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '192.168.1.23', '192.168.1.144']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '192.168.1.23', '192.168.1.144','livemenu.imcbs.com','www.livemenu.imcbs.com']
 
 # ============================================
 # INSTALLED APPS
