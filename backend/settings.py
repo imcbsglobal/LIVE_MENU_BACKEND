@@ -1,23 +1,45 @@
 """
-Django settings for backend project with PostgreSQL.
+Django settings for backend project with PostgreSQL + Cloudflare R2.
+
+Project structure:
+    D:\LIVE MENU PROJECT\
+    └── backend\                  <- BASE_DIR / where .env lives / where manage.py lives
+        ├── .env
+        ├── manage.py
+        └── backend\
+            └── settings.py      <- this file
 """
-
+import os
 from pathlib import Path
+from dotenv import load_dotenv
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
+# BASE_DIR = D:\LIVE MENU PROJECT\backend\
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# SECURITY WARNING: keep the secret key used in production secret!
+# .env is at D:\LIVE MENU PROJECT\backend\.env  ->  BASE_DIR / '.env'
+load_dotenv(BASE_DIR / '.env', override=True)
+
+# Read R2 flag immediately after dotenv loads
+CLOUDFLARE_R2_ENABLED = os.getenv("CLOUDFLARE_R2_ENABLED", "false").strip().lower() == "true"
+
+# Debug lines — shows on every server start so you can confirm .env loaded
+print(f"[settings] BASE_DIR    = {BASE_DIR}")
+print(f"[settings] .env exists = {(BASE_DIR / '.env').exists()}")
+print(f"[settings] R2 enabled  = {CLOUDFLARE_R2_ENABLED}")
+print(f"[settings] DB_NAME     = {os.getenv('DB_NAME')}")
+
+# ============================================
+# SECURITY
+# ============================================
 SECRET_KEY = 'django-insecure-g1@x=5suku6)8_2!8w4*a6*_f*t03__r)l1we=-xm80nit-@1d'
-
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
-
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '192.168.1.23', '192.168.1.144']
 
-# Application definition
+# ============================================
+# INSTALLED APPS
+# ============================================
 INSTALLED_APPS = [
-    'daphne',          # ← only here, at the top
+    'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -28,35 +50,26 @@ INSTALLED_APPS = [
     'corsheaders',
     'channels',
     'api',
+    'storages',
 ]
 
 ASGI_APPLICATION = 'backend.asgi.application'
 
-# ── Channel Layers ───────────────────────────────────────────────────────────
-# Using InMemoryChannelLayer — no Redis needed for single-server deployments.
-# For multi-server production, switch back to RedisChannelLayer.
+# ============================================
+# CHANNEL LAYERS
+# ============================================
 CHANNEL_LAYERS = {
     'default': {
         'BACKEND': 'channels.layers.InMemoryChannelLayer',
     },
 }
 
-# Redis config (disabled — uncomment if you install and run Redis)
-# CHANNEL_LAYERS = {
-#     'default': {
-#         'BACKEND': 'channels_redis.core.RedisChannelLayer',
-#         'CONFIG': {
-#             'hosts': [('127.0.0.1', 6379)],
-#         },
-#     },
-# }
-
+# ============================================
+# MIDDLEWARE
+# ============================================
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
-    # ── Explicit DB connection cleanup for ASGI/Daphne ──────────────────────
-    # Calls django.db.close_old_connections() on every request start and end.
-    # Prevents stale/leaked connections under high-concurrency async workloads.
     'backend.middleware.CloseOldConnectionsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -86,102 +99,55 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'backend.wsgi.application'
 
-
 # ============================================
-# DATABASE - PostgreSQL Configuration
+# DATABASE - PostgreSQL
 # ============================================
-# ✅ FIX: Added CONN_MAX_AGE=60 so Django reuses DB connections instead of
-#         opening a new connection on every request.
-#         Without this, under load Django exhausts PostgreSQL's max_connections
-#         limit (default 100), causing "sorry, too many clients already" errors.
-
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'Menu_db',
-        'USER': 'postgres',
-        'PASSWORD': '12345',
-        'HOST': 'localhost',
-        'PORT': '5432',
-        # ── IMPORTANT: CONN_MAX_AGE must be 0 when running under ASGI/Daphne ──
-        # Under WSGI, persistent connections are fine because each worker process
-        # handles one request at a time. Under ASGI, many coroutine threads share
-        # the same process — each gets its own DB connection with CONN_MAX_AGE>0,
-        # exhausting PostgreSQL's max_connections (default 100) very quickly.
-        # With CONN_MAX_AGE=0, Django closes the connection after every request.
-        'CONN_MAX_AGE': 0,
-        # Optional: also set connection pool limits at the PostgreSQL level by
-        # running: ALTER SYSTEM SET max_connections = 200; (then restart PG)
+        'ENGINE':       'django.db.backends.postgresql',
+        'NAME':         os.getenv('DB_NAME'),
+        'USER':         os.getenv('DB_USER'),
+        'PASSWORD':     os.getenv('DB_PASSWORD'),
+        'HOST':         os.getenv('DB_HOST'),
+        'PORT':         os.getenv('DB_PORT'),
+        'CONN_MAX_AGE': 60,
     }
 }
 
-# Alternative: If you want to use SQLite for testing (comment PostgreSQL config above)
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.sqlite3',
-#         'NAME': BASE_DIR / 'db.sqlite3',
-#     }
-# }
-
-
-# Password validation
+# ============================================
+# PASSWORD VALIDATION
+# ============================================
 AUTH_PASSWORD_VALIDATORS = [
-    {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-    },
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
-
-# Internationalization
+# ============================================
+# INTERNATIONALISATION
+# ============================================
 LANGUAGE_CODE = 'en-us'
-TIME_ZONE = 'Asia/Kolkata'  # Indian Standard Time
-USE_I18N = True
-USE_TZ = True
-
+TIME_ZONE     = 'Asia/Kolkata'
+USE_I18N      = True
+USE_TZ        = True
 
 # ============================================
-# STATIC FILES (CSS, JavaScript, Images)
+# STATIC FILES
 # ============================================
-STATIC_URL = 'static/'
+STATIC_URL  = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-
-# ============================================
-# MEDIA FILES (User Uploaded Images)
-# ============================================
-MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
-
-
-# Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-
 # ============================================
-# CORS Configuration
+# CORS
 # ============================================
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
-# For production, use this instead (more secure):
-# CORS_ALLOWED_ORIGINS = [
-#     "http://localhost:3000",
-#     "http://localhost:5173",
-#     "http://localhost:5174",
-# ]
-
-
 # ============================================
-# REST FRAMEWORK Configuration
+# REST FRAMEWORK
 # ============================================
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
@@ -189,35 +155,71 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PARSER_CLASSES': [
         'rest_framework.parsers.JSONParser',
-        'rest_framework.parsers.MultiPartParser',  # For file uploads
+        'rest_framework.parsers.MultiPartParser',
         'rest_framework.parsers.FormParser',
     ],
 }
 
+# ============================================
+# FILE STORAGE - Cloudflare R2 or local media
+# ============================================
+if CLOUDFLARE_R2_ENABLED:
+    # Use STORAGES for Django 4.2+
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+
+    AWS_ACCESS_KEY_ID       = os.getenv('CLOUDFLARE_R2_ACCESS_KEY', '').strip()
+    AWS_SECRET_ACCESS_KEY   = os.getenv('CLOUDFLARE_R2_SECRET_KEY', '').strip()
+    AWS_STORAGE_BUCKET_NAME = os.getenv('CLOUDFLARE_R2_BUCKET', '').strip()
+
+    _account_id             = os.getenv('CLOUDFLARE_R2_ACCOUNT_ID', '').strip()
+    AWS_S3_ENDPOINT_URL     = f'https://{_account_id}.r2.cloudflarestorage.com'
+    AWS_S3_REGION_NAME      = 'auto'
+
+    AWS_S3_SIGNATURE_VERSION = 's3v4'
+    AWS_S3_ADDRESSING_STYLE  = 'path'
+
+    AWS_S3_FILE_OVERWRITE    = False
+    AWS_DEFAULT_ACL          = None
+    AWS_QUERYSTRING_AUTH     = False
+
+    AWS_S3_OBJECT_PARAMETERS = {'CacheControl': 'max-age=86400'}
+
+    _public_url              = os.getenv('CLOUDFLARE_R2_PUBLIC_URL', '').replace('https://', '').rstrip('/')
+    AWS_S3_CUSTOM_DOMAIN     = _public_url
+    MEDIA_URL                = f'https://{_public_url}/'
+    MEDIA_ROOT               = ''
+
+    print(f"[settings] R2 STORAGE ACTIVE  -> bucket: {AWS_STORAGE_BUCKET_NAME} | cdn: {MEDIA_URL}")
+
+else:
+    MEDIA_URL  = '/media/'
+    MEDIA_ROOT = BASE_DIR / 'media'
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+
+    print(f"[settings] LOCAL STORAGE -> {MEDIA_ROOT}")
 
 # ============================================
 # SUPER ADMIN SECRET CODE
 # ============================================
-# Change this to your desired super admin master key
-# This allows super admin access to all companies
 SUPER_ADMIN_SECRET = "ADMIN@2024"
 
 # ============================================
 # STAFF SHARED CREDENTIALS
 # ============================================
-# One shared login for ALL staff (waiter + kitchen).
-# Staff only type username + password — no client ID on the form.
-#
-# STAFF_CLIENT_ID   — the client_id of your restaurant (from CompanyInfo).
-# STAFF_USERNAME    — the shared username every staff member types.
-# STAFF_PASSWORD_HASH — hashed password. To change it run:
-#
-#   python manage.py setstaffpassword
-#
-# or generate a hash manually:
-#   python manage.py shell -c "from django.contrib.auth.hashers import make_password; print(make_password('yourpassword'))"
-#
-# Default password is "staff1234" — CHANGE THIS before going live!
-STAFF_CLIENT_ID     = "CLI005"   # ← set this to your restaurant's client_id
+STAFF_CLIENT_ID     = "CLI005"
 STAFF_USERNAME      = "userstaff"
 STAFF_PASSWORD_HASH = "pbkdf2_sha256$720000$JGbQtfAmpICpkInQ$nstKfjCXI/aOl1w81nadO7yPItSiOB3zgHVYQT0/ENo="

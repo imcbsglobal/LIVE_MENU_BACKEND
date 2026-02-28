@@ -26,6 +26,7 @@ urlpatterns = [
     path('api/', include('api.urls')),
 ]
 
-# Add this to serve media files in development
-if settings.DEBUG:
+# Serve media files locally ONLY when R2 is disabled
+# When CLOUDFLARE_R2_ENABLED=true, all files go to R2 — no local serving needed
+if settings.DEBUG and not getattr(settings, 'CLOUDFLARE_R2_ENABLED', False):
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

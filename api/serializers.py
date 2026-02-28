@@ -9,6 +9,21 @@ from .models import MenuItem, Category, Tax, AppUser, CompanyInfo
 from .models import Customization, Banner, TVBanner, Table, Order, OrderItem
 
 
+def _build_url(request, url):
+    """
+    Return an absolute URL for a file field.
+    If the URL is already absolute (R2/CDN), return it as-is.
+    Otherwise use request.build_absolute_uri() for local media files.
+    """
+    if not url:
+        return None
+    if url.startswith('http://') or url.startswith('https://'):
+        return url  # Already absolute — R2 / CDN URL, don't prefix with server host
+    if request:
+        return request.build_absolute_uri(url)
+    return url
+
+
 class CompanyInfoSerializer(serializers.ModelSerializer):
     class Meta:
         model = CompanyInfo
@@ -53,9 +68,7 @@ class MenuItemSerializer(serializers.ModelSerializer):
     
     def get_image_url(self, obj):
         if obj.image:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.image.url)
+            return _build_url(self.context.get('request'), obj.image.url)
         return None
 
 
@@ -99,9 +112,7 @@ class BannerSerializer(serializers.ModelSerializer):
     
     def get_image_url(self, obj):
         if obj.image:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.image.url)
+            return _build_url(self.context.get('request'), obj.image.url)
         return None
 
 
@@ -126,10 +137,7 @@ class TVBannerSerializer(serializers.ModelSerializer):
 
     def get_image_url(self, obj):
         if obj.image and hasattr(obj.image, 'url'):
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.image.url)
-            return obj.image.url
+            return _build_url(self.context.get('request'), obj.image.url)
         return None
 
 # ============================================
@@ -190,23 +198,17 @@ class CustomizationSerializer(serializers.ModelSerializer):
 
     def get_logo_url(self, obj):
         if obj.logo:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.logo.url)
+            return _build_url(self.context.get('request'), obj.logo.url)
         return None
 
     def get_banner_url(self, obj):
         if obj.banner:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.banner.url)
+            return _build_url(self.context.get('request'), obj.banner.url)
         return None
 
     def get_tv_logo_url(self, obj):
         if obj.tv_logo:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri(obj.tv_logo.url)
+            return _build_url(self.context.get('request'), obj.tv_logo.url)
         return None
 
     def get_banners(self, obj):
