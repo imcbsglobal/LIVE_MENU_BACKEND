@@ -7,6 +7,7 @@ from .views import (
     user_login, staff_login, verify_secret_code,
     company_login, superadmin_login,
     create_super_admin, check_super_admin_exists,
+    license_lookup,
     get_users, create_user, create_test_user,
     update_user, delete_user, get_user_stats,
     get_waiter_list,
@@ -48,6 +49,7 @@ urlpatterns = [
 
     # ── Company ───────────────────────────────────────────────────────────────
     path('company-info/',      get_company_info,         name='get-company-info'),
+    path('license/lookup/',     license_lookup,           name='license-lookup'),
     path('company-info/save/', create_or_update_company, name='save-company-info'),
 
     # ── Customization ─────────────────────────────────────────────────────────

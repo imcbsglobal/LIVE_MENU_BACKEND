@@ -26,7 +26,7 @@ class CompanyInfo(models.Model):
     gst_number = models.CharField(max_length=50,  blank=True, null=True)
     pan_number = models.CharField(max_length=50,  blank=True, null=True)
     
-    leasing_key        = models.CharField(max_length=500, unique=True)
+    leasing_key        = models.CharField(max_length=500, unique=True, blank=True, null=True)
     leasing_start_date = models.DateField(blank=True, null=True)
     leasing_end_date   = models.DateField(blank=True, null=True)
     is_active          = models.BooleanField(default=True)

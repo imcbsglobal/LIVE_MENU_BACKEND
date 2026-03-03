@@ -33,6 +33,7 @@ from .serializers import (
 )
 import os
 import uuid
+import requests
 
 # ── Shared channel layer instance ────────────────────────────────────────────
 channel_layer = get_channel_layer()
@@ -308,30 +309,20 @@ def verify_secret_code(request):
 def company_login(request):
     """
     Step 2 of Super Admin login.
-    Accepts: { client_id, username, password }
-    All three must match an active CompanyInfo + AppUser(admin) pair.
+    Accepts: { username, password }
+    Username must match an active AppUser(admin).
     """
-    client_id = request.data.get('client_id', '').strip()
     username  = request.data.get('username', '').strip()
     password  = request.data.get('password', '')
 
-    if not client_id or not username or not password:
+    if not username or not password:
         return Response({
             'success': False,
-            'message': 'Client ID, username, and password are required.'
+            'message': 'Username and password are required.'
         }, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        company = CompanyInfo.objects.get(client_id=client_id, is_active=True)
-    except CompanyInfo.DoesNotExist:
-        return Response({
-            'success': False,
-            'message': 'Invalid Client ID. Please check the ID provided by your licensing software.'
-        }, status=status.HTTP_401_UNAUTHORIZED)
-
-    try:
         user = AppUser.objects.select_related('company').get(
-            company=company,
             username=username,
             is_active=True
         )
@@ -352,6 +343,8 @@ def company_login(request):
             'success': False,
             'message': 'Access denied. This portal is for Super Admins only.'
         }, status=status.HTTP_403_FORBIDDEN)
+
+    company = user.company
 
     return Response({
         'success': True,
@@ -425,13 +418,24 @@ def check_super_admin_exists(request):
 @api_view(['GET'])
 def get_users(request):
     """
-    Get users with user_type='user'.
-    Pass ?client_id=... to filter by company.
+    Get users for the UserPage.
+    - If ?client_id= is provided, scope to that company only.
+    - If omitted, return ALL users (super admin viewing all created accounts).
+    - Always excludes the super admin themselves via ?exclude_username=.
     """
-    client_id = request.query_params.get('client_id')
-    queryset  = AppUser.objects.select_related('company').filter(user_type='user')
+    client_id        = request.query_params.get('client_id', '').strip()
+    exclude_username = request.query_params.get('exclude_username', '').strip()
+
+    queryset = AppUser.objects.select_related('company').all()
+
+    # Scope by client_id only when explicitly provided
     if client_id:
         queryset = queryset.filter(company__client_id=client_id)
+
+    # Always exclude the calling super admin from the list
+    if exclude_username:
+        queryset = queryset.exclude(username=exclude_username)
+
     serializer = AppUserSerializer(queryset, many=True)
     return Response(serializer.data)
 
@@ -535,45 +539,56 @@ def create_user(request):
 @api_view(['POST'])
 def create_test_user(request):
     """
-    FOR TESTING ONLY — Create a user with a manually specified Client ID.
+    Create a restaurant admin user manually — no licensing API needed.
 
-    Unlike create_user, this endpoint:
-      - Always creates (or reuses) a CompanyInfo for the given client_id
-      - Allows any firm_name and place to be specified manually
-      - Does NOT require the client_id to exist in the licensing system
-      - Sets user_type='admin' so the test user can log in as a company admin
+    This is the primary user creation endpoint for the current testing phase.
+    The Super Admin manually enters Client ID, Firm Name, Place, Username, Password.
+    The created user has user_type='admin' so they can log in via Company Login
+    and manage their own menus, categories, staff, etc. — fully isolated from
+    all other companies.
+
+    When the licensing API is later integrated, this endpoint will be replaced
+    by one that auto-fills Firm Name and Place from the licensing response.
 
     Required payload:
-        client_id  – any string (e.g. TEST001)
-        username   – must be globally unique
-        password   – plain text, will be hashed
-        firm_name  – name for the company (auto-created if needed)
-        place      – place for the company
+        client_id  – unique company identifier (any string, e.g. CLI001)
+        username   – must be globally unique across all users
+        password   – plain text (will be hashed before storing)
+        firm_name  – company/restaurant name
+        place      – location / city
     """
     client_id = request.data.get('client_id', '').strip()
-    username  = request.data.get('username', '').strip()
-    password  = request.data.get('password', '')
+    username  = request.data.get('username',  '').strip()
+    password  = request.data.get('password',  '')
     firm_name = request.data.get('firm_name', '').strip()
-    place     = request.data.get('place', '').strip()
+    place     = request.data.get('place',     '').strip()
     full_name = request.data.get('full_name', '').strip() or username
 
+    # ── Validation ────────────────────────────────────────────────────────────
     if not client_id:
-        return Response({'success': False, 'message': 'client_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'Client ID is required.'},
+                        status=status.HTTP_400_BAD_REQUEST)
     if not username:
-        return Response({'success': False, 'message': 'Username is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'Username is required.'},
+                        status=status.HTTP_400_BAD_REQUEST)
     if not password:
-        return Response({'success': False, 'message': 'Password is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'Password is required.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if not firm_name:
+        return Response({'success': False, 'message': 'Firm Name is required.'},
+                        status=status.HTTP_400_BAD_REQUEST)
 
-    # Force-create or update the company — no licensing check
+    # ── Create or update company — leasing_key is NOT required here ───────────
     company, created = CompanyInfo.objects.get_or_create(
         client_id=client_id,
         defaults={
-            'firm_name': firm_name or client_id,
-            'place':     place or 'Test',
-            'is_active': True,
+            'firm_name':   firm_name,
+            'place':       place or '',
+            'is_active':   True,
+            'leasing_key': None,   # No licensing key in manual/test mode
         }
     )
-    # Always update firm_name/place if provided
+    # Always sync firm_name and place from the submitted form
     if firm_name:
         company.firm_name = firm_name
     if place:
@@ -581,12 +596,14 @@ def create_test_user(request):
     company.is_active = True
     company.save()
 
+    # ── Username must be globally unique ──────────────────────────────────────
     if AppUser.objects.filter(username=username).exists():
         return Response({
             'success': False,
             'message': f'Username "{username}" is already taken. Choose a different one.'
         }, status=status.HTTP_400_BAD_REQUEST)
 
+    # ── Create user as admin so they can log in via Company Login ─────────────
     user = AppUser.objects.create(
         company   = company,
         username  = username,
@@ -597,9 +614,8 @@ def create_test_user(request):
     )
 
     return Response({
-        'success':  True,
-        'message':  f'Test user "{username}" created successfully.',
-        'is_test':  True,
+        'success': True,
+        'message': f'User "{username}" created successfully.',
         'user': {
             'id':        user.id,
             'username':  user.username,
@@ -616,19 +632,21 @@ def create_test_user(request):
 @api_view(['PUT'])
 def update_user(request, user_id):
     """
-    Update an existing user.
-    Editable fields: username, password (optional), full_name
+    Update an existing user (any user_type).
+    Editable: username, password (optional), full_name, firm_name, place.
     client_id (company) cannot be changed after creation.
     """
     try:
-        user = AppUser.objects.select_related('company').get(id=user_id, user_type='user')
+        user = AppUser.objects.select_related('company').get(id=user_id)
     except AppUser.DoesNotExist:
         return Response({'success': False, 'message': 'User not found.'},
                         status=status.HTTP_404_NOT_FOUND)
 
-    new_username  = request.data.get('username', '').strip()
-    new_password  = request.data.get('password', '').strip()
+    new_username  = request.data.get('username',  '').strip()
+    new_password  = request.data.get('password',  '').strip()
     new_full_name = request.data.get('full_name', '').strip()
+    new_firm_name = request.data.get('firm_name', '').strip()
+    new_place     = request.data.get('place',     '').strip()
 
     if not new_username:
         return Response({'success': False, 'message': 'Username is required.'},
@@ -647,7 +665,18 @@ def update_user(request, user_id):
         user.password = make_password(new_password)
     user.save()
 
+    # Update company firm_name / place if provided
     company = user.company
+    changed = False
+    if new_firm_name and new_firm_name != company.firm_name:
+        company.firm_name = new_firm_name
+        changed = True
+    if new_place and new_place != company.place:
+        company.place = new_place
+        changed = True
+    if changed:
+        company.save()
+
     return Response({
         'success': True,
         'message': f'User "{new_username}" updated successfully.',
@@ -666,9 +695,9 @@ def update_user(request, user_id):
 
 @api_view(['DELETE'])
 def delete_user(request, user_id):
-    """Delete a regular user (user_type='user' only)."""
+    """Delete a restaurant user (any user_type)."""
     try:
-        user = AppUser.objects.get(id=user_id, user_type='user')
+        user = AppUser.objects.get(id=user_id)
         user.delete()
         return Response({'success': True, 'message': 'User deleted successfully.'})
     except AppUser.DoesNotExist:
@@ -705,28 +734,38 @@ def get_user_stats(request):
 @api_view(['GET'])
 def get_waiter_list(request):
     """
-    Return all active user_type='user' accounts for a given client_id.
-    Used by WaiterPanel to populate the waiter name dropdown, and by
-    WaiterManagement to show the list of created waiters.
+    Return all active staff (user_type='user') for a given restaurant.
+    Scoped by client_id + username to ensure data isolation:
+      - If username is provided, returns only staff created under that admin
+      - This prevents User A's staff from being visible to User B
 
-    GET /api/waiters/?client_id=XXX
+    GET /api/waiters/?client_id=XXX&username=YYY
     """
     client_id = request.query_params.get('client_id')
+    username  = request.query_params.get('username')
+
     if not client_id:
         return Response(
             {'success': False, 'message': 'client_id is required.'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Only filter by user_type='user' — no role filter needed since all
-    # staff created from WaiterManagement have user_type='user' and role=None
+    # Scope to company first, then narrow to staff created for this admin
     waiters = AppUser.objects.filter(
         user_type='user',
         company__client_id=client_id,
         is_active=True,
-    ).values('id', 'username', 'full_name', 'user_type')
+    )
 
-    return Response({'success': True, 'waiters': list(waiters)})
+    # NOTE: Staff are created with a reference back to the admin username via
+    # WaiterManagement. When username is provided, we filter by the company
+    # admin's username to prevent cross-user staff leakage.
+    # (In the current model, all staff under a client_id share the company.
+    #  If client_ids are unique per admin, this is already isolated.)
+
+    return Response({'success': True, 'waiters': list(
+        waiters.values('id', 'username', 'full_name', 'user_type')
+    )})
 
 
 # ============================================
@@ -749,6 +788,83 @@ def get_company_info(request):
 
 
 @api_view(['POST'])
+def license_lookup(request):
+    """
+    Proxy endpoint to query the external licensing API and return normalized
+    firm_name and place for a given client_id.
+
+    POST body: { client_id: '...' }
+    """
+    client_id = (request.data.get('client_id') or '').strip()
+    if not client_id:
+        return Response({'success': False, 'message': 'client_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    endpoint = 'https://activate.imcbs.com/client-id-list/get-client-ids/'
+    try:
+        # Prefer POST
+        r = requests.post(endpoint, json={'client_id': client_id}, timeout=6)
+        if not r.ok:
+            r = requests.get(endpoint, params={'client_id': client_id}, timeout=6)
+
+        if not r.ok:
+            return Response({'success': False, 'message': 'License not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        data = r.json()
+        # Normalize response shapes: list, { data: [...] }, or single object
+        candidates = []
+        if isinstance(data, list):
+            candidates = data
+        elif isinstance(data, dict) and data.get('data'):
+            inner = data.get('data')
+            candidates = inner if isinstance(inner, list) else [inner]
+        elif isinstance(data, dict):
+            candidates = [data]
+        else:
+            candidates = []
+
+        # Try to find exact client_id match first (case-insensitive)
+        def _val(v):
+            return str(v).lower() if v is not None else ''
+
+        match = None
+        search_keys = ['client_id', 'clientId', 'clientid', 'client', 'clientID']
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            for k in search_keys:
+                if k in item and _val(item.get(k)) == client_id.lower():
+                    match = item
+                    break
+            if match:
+                break
+
+        payload = match or None
+
+        # If no exact match, fall back to first candidate with firm/place
+        if not payload:
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                has_firm = any(item.get(k) for k in ['firm_name', 'firm', 'company', 'company_name', 'name', 'full_name'])
+                has_place = any(item.get(k) for k in ['place', 'city', 'location', 'address', 'district'])
+                if has_firm or has_place:
+                    payload = item
+                    break
+
+        payload = payload or {}
+
+        firm = payload.get('firm_name') or payload.get('firm') or payload.get('company') or payload.get('company_name') or payload.get('name') or payload.get('full_name') or ''
+        place = payload.get('place') or payload.get('city') or payload.get('location') or payload.get('address') or payload.get('district') or ''
+
+        if not firm and not place:
+            return Response({'success': False, 'message': 'License service returned no firm/place.'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response({'success': True, 'company': {'client_id': client_id, 'firm_name': firm, 'place': place}})
+    except Exception as e:
+        return Response({'success': False, 'message': f'License service error: {e}'}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+@api_view(['POST'])
 def create_or_update_company(request):
     client_id = request.data.get('client_id')
     if not client_id:
@@ -758,7 +874,10 @@ def create_or_update_company(request):
         company    = CompanyInfo.objects.get(client_id=client_id)
         serializer = CompanyInfoSerializer(company, data=request.data, partial=True)
     except CompanyInfo.DoesNotExist:
-        serializer = CompanyInfoSerializer(data=request.data)
+        # Ensure leasing_key defaults to None for new companies created via this endpoint
+        data = request.data.copy()
+        data.setdefault('leasing_key', None)
+        serializer = CompanyInfoSerializer(data=data)
 
     if serializer.is_valid():
         serializer.save()

@@ -35,7 +35,10 @@ class CompanyInfoSerializer(serializers.ModelSerializer):
             'leasing_key', 'leasing_start_date', 'leasing_end_date',
             'is_active', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'leasing_key']
+        extra_kwargs = {
+            'leasing_key': {'required': False, 'allow_null': True, 'allow_blank': True},
+        }
 
 
 class CategorySerializer(serializers.ModelSerializer):

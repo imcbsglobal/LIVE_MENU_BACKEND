@@ -71,13 +71,13 @@ class Command(BaseCommand):
             # Company not in DB yet — create it now
             firm_name   = options.get('firm_name') or input('Company / Firm Name: ').strip() or 'My Company'
             place       = options.get('place')     or input('Place / City: ').strip()        or 'HQ'
-            leasing_key = input('Leasing Key (press Enter to use ADMIN@2024): ').strip() or 'ADMIN@2024'
+            leasing_key_input = input('Leasing Key (press Enter to skip): ').strip() or None
 
             company = CompanyInfo.objects.create(
                 client_id   = client_id,
                 firm_name   = firm_name,
                 place       = place,
-                leasing_key = leasing_key,
+                leasing_key = leasing_key_input,
                 is_active   = True,
             )
             self.stdout.write(self.style.SUCCESS(f"  Created company: {firm_name} ({place})"))
