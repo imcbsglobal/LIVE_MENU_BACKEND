@@ -29,9 +29,10 @@ class CompanyInfoSerializer(serializers.ModelSerializer):
         model = CompanyInfo
         fields = [
             'client_id', 'firm_name', 'place',
-            'address', 'district', 'pin_code',
+                'address', 'district', 'pin_code',
             'phone', 'phone2',
             'email', 'gst_number', 'pan_number',
+                'allowed_pages',
             'leasing_key', 'leasing_start_date', 'leasing_end_date',
             'is_active', 'created_at', 'updated_at',
         ]

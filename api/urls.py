@@ -9,7 +9,7 @@ from .views import (
     create_super_admin, check_super_admin_exists,
     license_lookup,
     get_users, create_user, create_test_user,
-    update_user, delete_user, get_user_stats,
+    update_user, delete_user, save_user_pages, get_user_stats,
     get_waiter_list,
     get_company_info, create_or_update_company,
     get_customization, save_customization, delete_customization_file,
@@ -44,6 +44,7 @@ urlpatterns = [
     path('users/create-test/',          create_test_user, name='create-test-user'),
     path('users/<int:user_id>/',        delete_user,      name='delete-user'),
     path('users/<int:user_id>/update/', update_user,      name='update-user'),
+    path('users/<int:user_id>/pages/',  save_user_pages,  name='save-user-pages'),
     path('user-stats/',                 get_user_stats,   name='user-stats'),
     path('waiters/',                    get_waiter_list,  name='get-waiter-list'),
 

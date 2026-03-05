@@ -30,7 +30,16 @@ class CompanyInfo(models.Model):
     leasing_start_date = models.DateField(blank=True, null=True)
     leasing_end_date   = models.DateField(blank=True, null=True)
     is_active          = models.BooleanField(default=True)
-    
+
+    # Page access control — set by Super Admin.
+    # JSON array of page IDs the company's users may access.
+    # e.g. ["home", "admin", "items-list", "category"]
+    # NULL means ALL pages are accessible (no restriction).
+    allowed_pages = models.JSONField(
+        blank=True, null=True, default=None,
+        help_text='List of page IDs accessible to this company. NULL = unrestricted.'
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     

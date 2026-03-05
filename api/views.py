@@ -436,8 +436,20 @@ def get_users(request):
     if exclude_username:
         queryset = queryset.exclude(username=exclude_username)
 
-    serializer = AppUserSerializer(queryset, many=True)
-    return Response(serializer.data)
+    users_data = []
+    for u in queryset:
+        users_data.append({
+            'id':            u.id,
+            'username':      u.username,
+            'full_name':     u.full_name,
+            'user_type':     u.user_type,
+            'client_id':     u.company.client_id,
+            'firm_name':     u.company.firm_name,
+            'place':         u.company.place,
+            'is_active':     u.is_active,
+            'allowed_pages': u.company.allowed_pages,
+        })
+    return Response(users_data)
 
 
 @api_view(['POST'])
@@ -617,14 +629,15 @@ def create_test_user(request):
         'success': True,
         'message': f'User "{username}" created successfully.',
         'user': {
-            'id':        user.id,
-            'username':  user.username,
-            'full_name': user.full_name,
-            'user_type': user.user_type,
-            'client_id': company.client_id,
-            'firm_name': company.firm_name,
-            'place':     company.place,
-            'is_active': user.is_active,
+            'id':            user.id,
+            'username':      user.username,
+            'full_name':     user.full_name,
+            'user_type':     user.user_type,
+            'client_id':     company.client_id,
+            'firm_name':     company.firm_name,
+            'place':         company.place,
+            'is_active':     user.is_active,
+            'allowed_pages': company.allowed_pages,
         }
     }, status=status.HTTP_201_CREATED)
 
@@ -681,15 +694,88 @@ def update_user(request, user_id):
         'success': True,
         'message': f'User "{new_username}" updated successfully.',
         'user': {
-            'id':        user.id,
-            'username':  user.username,
-            'full_name': user.full_name,
-            'user_type': user.user_type,
-            'client_id': company.client_id,
-            'firm_name': company.firm_name,
-            'place':     company.place,
-            'is_active': user.is_active,
+            'id':            user.id,
+            'username':      user.username,
+            'full_name':     user.full_name,
+            'user_type':     user.user_type,
+            'client_id':     company.client_id,
+            'firm_name':     company.firm_name,
+            'place':         company.place,
+            'is_active':     user.is_active,
+            'allowed_pages': company.allowed_pages,
         }
+    })
+
+
+@api_view(['POST'])
+def save_user_pages(request, user_id):
+    """
+    Super Admin sets which pages a company's users can access.
+
+    POST body:
+        client_id     – the stable company identifier (preferred lookup key)
+        allowed_pages – list of page IDs, or null for unrestricted access
+
+    Looks up by client_id first (stable), falls back to AppUser.id if not provided.
+    NOTE: Requires the allowed_pages column — run fix_allowed_pages.py if missing.
+    """
+    allowed_pages = request.data.get('allowed_pages', None)
+    client_id     = request.data.get('client_id', '').strip()
+
+    # null = unrestricted; must be a list otherwise
+    if allowed_pages is not None and not isinstance(allowed_pages, list):
+        return Response(
+            {'success': False, 'message': 'allowed_pages must be a list or null.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # ── Look up company directly by client_id (stable, preferred) ─────────────
+    if client_id:
+        try:
+            company = CompanyInfo.objects.get(client_id=client_id)
+        except CompanyInfo.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': f'Company with client_id="{client_id}" not found.'
+            }, status=status.HTTP_404_NOT_FOUND)
+    else:
+        # Fallback: look up via AppUser.id (legacy path)
+        try:
+            user    = AppUser.objects.select_related('company').get(id=user_id)
+            company = user.company
+        except AppUser.DoesNotExist:
+            return Response({
+                'success': False,
+                'message': (
+                    f'User id={user_id} not found. '
+                    'Please refresh the user list and try again.'
+                )
+            }, status=status.HTTP_404_NOT_FOUND)
+
+    # ── Save allowed_pages on the company ─────────────────────────────────────
+    try:
+        company.allowed_pages = allowed_pages
+        company.save(update_fields=['allowed_pages'])
+    except Exception as e:
+        err_str = str(e)
+        if 'column' in err_str.lower() or 'does not exist' in err_str.lower():
+            return Response({
+                'success': False,
+                'message': (
+                    'Database column missing. '
+                    'Please run fix_allowed_pages.py on the server, then restart Django.'
+                ),
+                'detail': err_str,
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({
+            'success': False,
+            'message': f'Failed to save page access: {err_str}',
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return Response({
+        'success':       True,
+        'message':       'Page access updated successfully.',
+        'allowed_pages': company.allowed_pages,
     })
 
 
