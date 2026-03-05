@@ -876,78 +876,80 @@ def get_company_info(request):
 @api_view(['POST'])
 def license_lookup(request):
     """
-    Proxy endpoint to query the external licensing API and return normalized
-    firm_name and place for a given client_id.
+    Proxy endpoint — fetches the full client list from the licensing server
+    and returns firm_name + place for the requested client_id.
+
+    External API: GET https://activate.imcbs.com/client-id-list/get-client-ids/
+    Response shape: { "status": true, "count": N, "data": [
+        { "client_id": "...", "company_name": "...", "place": "..." }, ...
+    ]}
 
     POST body: { client_id: '...' }
     """
-    client_id = (request.data.get('client_id') or '').strip()
+    client_id = (request.data.get('client_id') or '').strip().upper()
     if not client_id:
         return Response({'success': False, 'message': 'client_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
     endpoint = 'https://activate.imcbs.com/client-id-list/get-client-ids/'
     try:
-        # Prefer POST
-        r = requests.post(endpoint, json={'client_id': client_id}, timeout=6)
+        # Always GET the full list (API ignores query params — returns all clients)
+        r = requests.get(endpoint, timeout=8)
         if not r.ok:
-            r = requests.get(endpoint, params={'client_id': client_id}, timeout=6)
-
-        if not r.ok:
-            return Response({'success': False, 'message': 'License not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {'success': False, 'message': f'Licensing server returned {r.status_code}.'},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
 
         data = r.json()
-        # Normalize response shapes: list, { data: [...] }, or single object
+
+        # Extract the list — API shape: { status, count, data: [...] }
         candidates = []
         if isinstance(data, list):
             candidates = data
-        elif isinstance(data, dict) and data.get('data'):
-            inner = data.get('data')
-            candidates = inner if isinstance(inner, list) else [inner]
         elif isinstance(data, dict):
-            candidates = [data]
-        else:
-            candidates = []
+            inner = data.get('data') or data.get('results') or data.get('clients') or []
+            candidates = inner if isinstance(inner, list) else [inner]
 
-        # Try to find exact client_id match first (case-insensitive)
-        def _val(v):
-            return str(v).lower() if v is not None else ''
-
+        # Find exact client_id match (case-insensitive)
         match = None
-        search_keys = ['client_id', 'clientId', 'clientid', 'client', 'clientID']
         for item in candidates:
             if not isinstance(item, dict):
                 continue
-            for k in search_keys:
-                if k in item and _val(item.get(k)) == client_id.lower():
+            # Try all possible key names for the client_id field
+            for key in ('client_id', 'clientId', 'clientid', 'clientID'):
+                val = item.get(key)
+                if val and str(val).strip().upper() == client_id:
                     match = item
                     break
             if match:
                 break
 
-        payload = match or None
+        if not match:
+            return Response(
+                {'success': False, 'message': f'Client ID "{client_id}" not found in licensing server.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-        # If no exact match, fall back to first candidate with firm/place
-        if not payload:
-            for item in candidates:
-                if not isinstance(item, dict):
-                    continue
-                has_firm = any(item.get(k) for k in ['firm_name', 'firm', 'company', 'company_name', 'name', 'full_name'])
-                has_place = any(item.get(k) for k in ['place', 'city', 'location', 'address', 'district'])
-                if has_firm or has_place:
-                    payload = item
-                    break
+        # Map field names — API uses 'company_name', not 'firm_name'
+        firm  = (match.get('company_name') or match.get('firm_name') or
+                 match.get('firm') or match.get('company') or match.get('name') or '').strip()
+        place = (match.get('place') or match.get('city') or
+                 match.get('location') or match.get('address') or '').strip()
 
-        payload = payload or {}
+        return Response({
+            'success': True,
+            'company': {
+                'client_id': client_id,
+                'firm_name': firm,
+                'place':     place,
+            }
+        })
 
-        firm = payload.get('firm_name') or payload.get('firm') or payload.get('company') or payload.get('company_name') or payload.get('name') or payload.get('full_name') or ''
-        place = payload.get('place') or payload.get('city') or payload.get('location') or payload.get('address') or payload.get('district') or ''
-
-        if not firm and not place:
-            return Response({'success': False, 'message': 'License service returned no firm/place.'}, status=status.HTTP_502_BAD_GATEWAY)
-
-        return Response({'success': True, 'company': {'client_id': client_id, 'firm_name': firm, 'place': place}})
     except Exception as e:
-        return Response({'success': False, 'message': f'License service error: {e}'}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(
+            {'success': False, 'message': f'License service error: {str(e)}'},
+            status=status.HTTP_502_BAD_GATEWAY
+        )
 
 
 @api_view(['POST'])

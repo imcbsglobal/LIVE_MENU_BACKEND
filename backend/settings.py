@@ -33,7 +33,7 @@ print(f"[settings] DB_NAME     = {os.getenv('DB_NAME')}")
 # ============================================
 SECRET_KEY = 'django-insecure-g1@x=5suku6)8_2!8w4*a6*_f*t03__r)l1we=-xm80nit-@1d'
 DEBUG = True
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '192.168.1.23', '192.168.1.144','livemenu.imcbs.com','www.livemenu.imcbs.com']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '192.168.1.23', '192.168.1.57', '192.168.1.144', 'livemenu.imcbs.com', 'www.livemenu.imcbs.com']
 
 # ============================================
 # INSTALLED APPS
@@ -137,6 +137,11 @@ USE_TZ        = True
 # ============================================
 STATIC_URL  = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# ── Frontend (React build) ────────────────────────────────────────────────────
+# After running: npm run build  in the frontend/ folder,
+# Django serves the built files at / so QR codes work from any device/network.
+FRONTEND_DIR = BASE_DIR.parent / 'frontend' / 'dist'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
