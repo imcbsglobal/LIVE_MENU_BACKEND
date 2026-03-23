@@ -32,7 +32,8 @@ class CompanyInfoSerializer(serializers.ModelSerializer):
                 'address', 'district', 'pin_code',
             'phone', 'phone2',
             'email', 'gst_number', 'pan_number',
-                'allowed_pages',
+                'allowed_pages', 'package',
+            'instagram_url', 'google_url', 'whatsapp',
             'leasing_key', 'leasing_start_date', 'leasing_end_date',
             'is_active', 'created_at', 'updated_at',
         ]
@@ -45,7 +46,7 @@ class CompanyInfoSerializer(serializers.ModelSerializer):
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
-        fields = ['id', 'name', 'username', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'client_id', 'username', 'created_at', 'updated_at']
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 

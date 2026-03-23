@@ -3,26 +3,22 @@ Django settings for backend project with PostgreSQL + Cloudflare R2.
 
 Project structure:
     D:\LIVE MENU PROJECT\
-    └── backend\                  <- BASE_DIR / where .env lives / where manage.py lives
+    └── backend\
         ├── .env
         ├── manage.py
         └── backend\
-            └── settings.py      <- this file
+            └── settings.py   <- this file
 """
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# BASE_DIR = D:\LIVE MENU PROJECT\backend\
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# .env is at D:\LIVE MENU PROJECT\backend\.env  ->  BASE_DIR / '.env'
 load_dotenv(BASE_DIR / '.env', override=True)
 
-# Read R2 flag immediately after dotenv loads
 CLOUDFLARE_R2_ENABLED = os.getenv("CLOUDFLARE_R2_ENABLED", "false").strip().lower() == "true"
 
-# Debug lines — shows on every server start so you can confirm .env loaded
 print(f"[settings] BASE_DIR    = {BASE_DIR}")
 print(f"[settings] .env exists = {(BASE_DIR / '.env').exists()}")
 print(f"[settings] R2 enabled  = {CLOUDFLARE_R2_ENABLED}")
@@ -33,7 +29,15 @@ print(f"[settings] DB_NAME     = {os.getenv('DB_NAME')}")
 # ============================================
 SECRET_KEY = 'django-insecure-g1@x=5suku6)8_2!8w4*a6*_f*t03__r)l1we=-xm80nit-@1d'
 DEBUG = True
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '192.168.1.23', '192.168.1.57', '192.168.1.144', 'livemenu.imcbs.com', 'www.livemenu.imcbs.com']
+ALLOWED_HOSTS = [
+    'localhost',
+    '127.0.0.1',
+    '192.168.1.23',
+    '192.168.1.57',
+    '192.168.1.144',
+    'livemenu.imcbs.com',
+    'www.livemenu.imcbs.com',
+]
 
 # ============================================
 # INSTALLED APPS
@@ -51,6 +55,7 @@ INSTALLED_APPS = [
     'channels',
     'api',
     'storages',
+    'django_extensions',
 ]
 
 ASGI_APPLICATION = 'backend.asgi.application'
@@ -138,9 +143,6 @@ USE_TZ        = True
 STATIC_URL  = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-# ── Frontend (React build) ────────────────────────────────────────────────────
-# After running: npm run build  in the frontend/ folder,
-# Django serves the built files at / so QR codes work from any device/network.
 FRONTEND_DIR = BASE_DIR.parent / 'frontend' / 'dist'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
@@ -169,7 +171,6 @@ REST_FRAMEWORK = {
 # FILE STORAGE - Cloudflare R2 or local media
 # ============================================
 if CLOUDFLARE_R2_ENABLED:
-    # Use STORAGES for Django 4.2+
     STORAGES = {
         "default": {
             "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
@@ -189,19 +190,17 @@ if CLOUDFLARE_R2_ENABLED:
 
     AWS_S3_SIGNATURE_VERSION = 's3v4'
     AWS_S3_ADDRESSING_STYLE  = 'path'
-
     AWS_S3_FILE_OVERWRITE    = False
     AWS_DEFAULT_ACL          = None
     AWS_QUERYSTRING_AUTH     = False
-
     AWS_S3_OBJECT_PARAMETERS = {'CacheControl': 'max-age=86400'}
 
-    _public_url              = os.getenv('CLOUDFLARE_R2_PUBLIC_URL', '').replace('https://', '').rstrip('/')
-    AWS_S3_CUSTOM_DOMAIN     = _public_url
-    MEDIA_URL                = f'https://{_public_url}/'
-    MEDIA_ROOT               = ''
+    _public_url          = os.getenv('CLOUDFLARE_R2_PUBLIC_URL', '').replace('https://', '').rstrip('/')
+    AWS_S3_CUSTOM_DOMAIN = _public_url
+    MEDIA_URL            = f'https://{_public_url}/'
+    MEDIA_ROOT           = ''
 
-    print(f"[settings] R2 STORAGE ACTIVE  -> bucket: {AWS_STORAGE_BUCKET_NAME} | cdn: {MEDIA_URL}")
+    print(f"[settings] R2 STORAGE ACTIVE -> bucket: {AWS_STORAGE_BUCKET_NAME} | cdn: {MEDIA_URL}")
 
 else:
     MEDIA_URL  = '/media/'
@@ -218,12 +217,13 @@ else:
     print(f"[settings] LOCAL STORAGE -> {MEDIA_ROOT}")
 
 # ============================================
-# SUPER ADMIN SECRET CODE
+# SUPER ADMIN
 # ============================================
+# Secret code required at login — change this before deploying!
 SUPER_ADMIN_SECRET = "ADMIN@2024"
 
 # ============================================
-# STAFF SHARED CREDENTIALS
+# STAFF SHARED CREDENTIALS (legacy)
 # ============================================
 STAFF_CLIENT_ID     = "CLI005"
 STAFF_USERNAME      = "userstaff"

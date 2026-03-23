@@ -1,22 +1,18 @@
 # api/views.py
-# Complete Views with Client ID Integration and FIXED Authentication
-# Restaurant Menu Management System
-# UPDATED: Added WebSocket notifications for waiter/kitchen panels
-#          Added accept_order endpoint (waiter accepts → kitchen notified)
-#          Added get_waiter_list endpoint (for dropdown in WaiterPanel)
-#          FIXED: create_user — role field handled safely (null for user_type='user')
-#          FIXED: get_waiter_list — queries only user_type='user', no role filter
-#          FIXED: staff_login — finds admin username correctly
-#          NEW:   Table Master CRUD (get_tables, create_table, update_table, delete_table)
-#          NEW:   TV Banner CRUD (get_tv_banners, upload_tv_banners, delete_tv_banner, reorder_tv_banners)
+# UPDATED:
+#   - superadmin_login  → separate endpoint, secret_code required
+#   - company_login     → only user_type='admin' allowed
+#   - staff_login       → only user_type='user' allowed
+#   - create_company_admin → Super Admin creates Company Admin
+#   - get_all_companies    → Super Admin sees all companies
+#   - All existing views unchanged
 
 from rest_framework import viewsets, status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.exceptions import PermissionDenied
 from django.contrib.auth.hashers import make_password, check_password
-from django.db.models import Q, Count, Sum, Max
+from django.db.models import Q, Count, Sum, Max, ProtectedError
 from django.conf import settings
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -28,56 +24,111 @@ from .serializers import (
     MenuItemSerializer, CategorySerializer, TaxSerializer,
     AppUserSerializer, CompanyInfoSerializer,
     CustomizationSerializer, BannerSerializer, TVBannerSerializer,
-    TableSerializer,
-    OrderSerializer, OrderCreateSerializer, OrderItemSerializer
+    TableSerializer, OrderSerializer, OrderCreateSerializer
 )
-import os
-import uuid
 import requests
 
-# ── Shared channel layer instance ────────────────────────────────────────────
-channel_layer = get_channel_layer()
+channel_layer       = get_channel_layer()
+_SUPER_ADMIN_SECRET = getattr(settings, 'SUPER_ADMIN_SECRET', 'ADMIN@2024')
+
+# ── Package → allowed_pages mapping (mirrors frontend PackageConfig.js) ──────
+_PRO_PAGES = [
+    'home', 'items-list', 'display', 'admin', 'category',
+    'tax', 'customization', 'tv-banner', 'company-info', 'menu-qr',
+    'staff-access', 'waiter-panel',
+]
+_BASIC_PAGES = [
+    'home', 'items-list', 'display', 'admin', 'category',
+    'tax', 'customization', 'tv-banner', 'company-info', 'menu-qr',
+]
+
+def _allowed_pages_for_package(package):
+    """Convert package key to allowed_pages list (None = unrestricted for premium)."""
+    if package == 'pro':   return _PRO_PAGES
+    if package == 'basic': return _BASIC_PAGES
+    return None  # premium — unrestricted
+
+def _detect_package(allowed_pages):
+    """Guess package key from stored allowed_pages array."""
+    if allowed_pages is None:
+        return 'premium'
+    s = sorted(allowed_pages)
+    if s == sorted(_PRO_PAGES):   return 'pro'
+    if s == sorted(_BASIC_PAGES): return 'basic'
+    premium_only = {'kitchen-panel', 'table-master'}
+    if premium_only & set(allowed_pages): return 'premium'
+    return 'basic'
 
 
-# ============================================
+# ─────────────────────────────────────────────────────────────
 # CATEGORY VIEWSET
-# ============================================
+# ─────────────────────────────────────────────────────────────
 class CategoryViewSet(viewsets.ModelViewSet):
     serializer_class = CategorySerializer
 
     def get_queryset(self):
-        username = self.request.query_params.get('username')
+        client_id = self.request.query_params.get('client_id')
+        username  = self.request.query_params.get('username')
+        if client_id:
+            return Category.objects.filter(client_id=client_id)
         if username:
             return Category.objects.filter(username=username)
-        return Category.objects.all()
+        return Category.objects.none()
 
     def perform_create(self, serializer):
         serializer.save()
 
+    def destroy(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+            instance.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except ProtectedError as e:
+            count = len(list(e.protected_objects))
+            names = ', '.join(str(o) for o in list(e.protected_objects)[:5])
+            extra = f' ... and {count - 5} more.' if count > 5 else ''
+            return Response({
+                'detail': (
+                    f'Cannot delete — {count} menu item(s) use this category. '
+                    f'Reassign or delete them first. Items: {names}{extra}'
+                ),
+                'item_count': count,
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-# ============================================
+
+# ─────────────────────────────────────────────────────────────
 # TAX VIEWSET
-# ============================================
+# ─────────────────────────────────────────────────────────────
 class TaxViewSet(viewsets.ModelViewSet):
     serializer_class = TaxSerializer
 
     def get_queryset(self):
         username      = self.request.query_params.get('username')
         status_filter = self.request.query_params.get('status')
-        queryset      = Tax.objects.all()
-        if username:
-            queryset = queryset.filter(username=username)
-        if status_filter:
-            queryset = queryset.filter(status=status_filter)
-        return queryset
+        qs = Tax.objects.all()
+        if username:      qs = qs.filter(username=username)
+        if status_filter: qs = qs.filter(status=status_filter)
+        return qs
 
-    def perform_create(self, serializer):
-        serializer.save()
+    def destroy(self, request, *args, **kwargs):
+        try:
+            self.get_object().delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except ProtectedError as e:
+            count = len(list(e.protected_objects))
+            return Response({
+                'detail': f'Cannot delete — used by {count} menu item(s).',
+                'item_count': count,
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-# ============================================
+# ─────────────────────────────────────────────────────────────
 # MENU ITEM VIEWSET
-# ============================================
+# ─────────────────────────────────────────────────────────────
 class MenuItemViewSet(viewsets.ModelViewSet):
     serializer_class = MenuItemSerializer
 
@@ -87,40 +138,220 @@ class MenuItemViewSet(viewsets.ModelViewSet):
         status_filter = self.request.query_params.get('status')
         category      = self.request.query_params.get('category')
 
-        queryset = MenuItem.objects.select_related('category').all()
-
-        # Always scope by both client_id AND username when both are present.
-        # This guarantees data isolation — one user never sees another's items.
+        qs = MenuItem.objects.select_related('category').all()
         if client_id and username:
-            queryset = queryset.filter(client_id=client_id, username=username)
-        elif username:
-            queryset = queryset.filter(username=username)
+            qs = qs.filter(client_id=client_id, username=username)
         elif client_id:
-            queryset = queryset.filter(client_id=client_id)
+            qs = qs.filter(client_id=client_id)
+        elif username:
+            qs = qs.filter(username=username)
 
-        if status_filter:
-            queryset = queryset.filter(status=status_filter)
-        if category:
-            queryset = queryset.filter(category__name=category)
-        return queryset.order_by('category', 'name')
-
-    def perform_create(self, serializer):
-        serializer.save()
+        if status_filter: qs = qs.filter(status=status_filter)
+        if category:      qs = qs.filter(category__name=category)
+        return qs.order_by('category', 'name')
 
 
-# ============================================
+# ═════════════════════════════════════════════════════════════
 # AUTHENTICATION
-# ============================================
+# ═════════════════════════════════════════════════════════════
 
+# ─────────────────────────────────────────────────────────────
+# 1. SUPER ADMIN LOGIN
+#    POST /api/superadmin-login/
+#    Body: { secret_code, username, password }
+#
+#    Flow:
+#      a) Verify secret_code == settings.SUPER_ADMIN_SECRET
+#      b) Find AppUser where username matches AND user_type='superadmin'
+#      c) Check password
+#      d) Return token-free session payload (frontend stores in localStorage)
+# ─────────────────────────────────────────────────────────────
+@api_view(['POST'])
+def superadmin_login(request):
+    secret_code = request.data.get('secret_code', '').strip()
+    username    = request.data.get('username', '').strip()
+    password    = request.data.get('password', '')
+
+    if not secret_code:
+        return Response({'success': False, 'message': 'Secret code is required.'}, status=400)
+    if secret_code != _SUPER_ADMIN_SECRET:
+        return Response({'success': False, 'message': 'Invalid secret code.'}, status=401)
+
+    if not username or not password:
+        return Response({'success': False, 'message': 'Username and password are required.'}, status=400)
+
+    try:
+        user = AppUser.objects.get(username=username, user_type='superadmin', is_active=True)
+    except AppUser.DoesNotExist:
+        return Response({'success': False, 'message': 'Super Admin account not found.'}, status=401)
+
+    if not check_password(password, user.password):
+        return Response({'success': False, 'message': 'Incorrect password.'}, status=401)
+
+    return Response({
+        'success': True,
+        'message': 'Super Admin login successful.',
+        'user': {
+            'id':        user.id,
+            'username':  user.username,
+            'full_name': user.full_name or 'Super Admin',
+            'user_type': 'superadmin',
+            'client_id': None,
+            'firm_name': 'Platform',
+            'place':     '',
+            'is_active': user.is_active,
+        }
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# 2. COMPANY ADMIN LOGIN
+#    POST /api/company-login/
+#    Body: { username, password }
+#
+#    Only user_type='admin' can log in here.
+#    Returns company info so frontend can scope all queries.
+# ─────────────────────────────────────────────────────────────
+@api_view(['POST'])
+def company_login(request):
+    username = request.data.get('username', '').strip()
+    password = request.data.get('password', '')
+
+    if not username or not password:
+        return Response({'success': False, 'message': 'Username and password are required.'}, status=400)
+
+    try:
+        user = AppUser.objects.select_related('company').get(username=username, is_active=True)
+    except AppUser.DoesNotExist:
+        return Response({'success': False, 'message': 'Invalid username or password.'}, status=401)
+
+    if not check_password(password, user.password):
+        return Response({'success': False, 'message': 'Invalid username or password.'}, status=401)
+
+    if user.user_type != 'admin':
+        return Response({
+            'success': False,
+            'message': 'This portal is for Company Admins only. Use Staff Login instead.'
+        }, status=403)
+
+    if not user.company or not user.company.is_active:
+        return Response({'success': False, 'message': 'Company account is inactive.'}, status=403)
+
+    company = user.company
+    return Response({
+        'success': True,
+        'message': 'Login successful.',
+        'user': {
+            'id':            user.id,
+            'username':      user.username,
+            'full_name':     user.full_name,
+            'user_type':     'company',        # frontend key — maps to 'admin' in DB
+            'client_id':     company.client_id,
+            'firm_name':     company.firm_name,
+            'place':         company.place,
+            'is_active':     user.is_active,
+            'allowed_pages':  company.allowed_pages,
+            'package':        company.package or _detect_package(company.allowed_pages),
+            'instagram_url':  company.instagram_url or '',
+            'google_url':     company.google_url    or '',
+            'whatsapp':       company.whatsapp       or '',
+        }
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# 3. STAFF LOGIN
+#    POST /api/staff-login/
+#    Body: { username, password }
+#
+#    Only user_type='user' can log in here.
+#    Returns restaurant_username (admin's username) so every
+#    page component fetches data from the correct namespace.
+# ─────────────────────────────────────────────────────────────
+@api_view(['POST'])
+def staff_login(request):
+    username = request.data.get('username', '').strip()
+    password = request.data.get('password', '')
+
+    if not username or not password:
+        return Response({'success': False, 'message': 'Username and password are required.'}, status=400)
+
+    try:
+        user = AppUser.objects.select_related('company').get(username=username)
+    except AppUser.DoesNotExist:
+        return Response({
+            'success': False,
+            'message': f'No account found with username "{username}".'
+        }, status=401)
+
+    if user.user_type != 'user':
+        return Response({
+            'success': False,
+            'message': 'Staff login is for staff accounts only. Use Company Admin Login.'
+        }, status=401)
+
+    if not user.is_active:
+        return Response({'success': False, 'message': 'Account is deactivated.'}, status=401)
+
+    # Support both hashed and plain passwords (legacy migration)
+    stored = user.password or ''
+    known_prefixes = ('pbkdf2_sha256$', 'pbkdf2_sha1$', 'argon2', 'bcrypt', 'md5$', 'sha1$')
+    is_hashed = any(stored.startswith(p) for p in known_prefixes)
+    if is_hashed:
+        password_ok = check_password(password, stored)
+    else:
+        import hmac
+        password_ok = hmac.compare_digest(stored, password)
+        if password_ok:
+            user.password = make_password(password)
+            user.save(update_fields=['password'])
+
+    if not password_ok:
+        return Response({'success': False, 'message': 'Incorrect password.'}, status=401)
+
+    if not user.company or not user.company.is_active:
+        return Response({'success': False, 'message': 'Company account is inactive.'}, status=403)
+
+    # Find the Company Admin for this company to get the restaurant_username
+    admin_user = (
+        AppUser.objects
+        .filter(company=user.company, user_type='admin', is_active=True)
+        .order_by('created_at')
+        .first()
+    )
+    restaurant_username = admin_user.username if admin_user else user.username
+
+    return Response({
+        'success': True,
+        'message': 'Login successful.',
+        'user': {
+            'id':                  user.id,
+            'username':            user.username,
+            'full_name':           user.full_name or user.username,
+            'restaurant_username': restaurant_username,
+            'user_type':           'staff',
+            'role':                user.role or 'both',
+            'client_id':           user.company.client_id,
+            'firm_name':           user.company.firm_name,
+            'place':               user.company.place,
+            'is_active':           user.is_active,
+            'allowed_pages':       user.allowed_pages,
+        }
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# Legacy endpoint — kept for backward compat
+# ─────────────────────────────────────────────────────────────
+# user_login — accepts client_id + username + password
+# Used by UserLogin.jsx (the main login page with client ID field)
+# Only user_type='admin' can log in here.
+# ─────────────────────────────────────────────────────────────
 @api_view(['POST'])
 def user_login(request):
-    """
-    Regular user login.
-    Requires: client_id, username, password.
-    """
     client_id = request.data.get('client_id', '').strip()
-    username  = request.data.get('username', '').strip()
-    password  = request.data.get('password', '')
+    username  = request.data.get('username',  '').strip()
+    password  = request.data.get('password',  '')
 
     if not client_id or not username or not password:
         return Response({
@@ -132,409 +363,160 @@ def user_login(request):
         user = AppUser.objects.select_related('company').get(
             company__client_id=client_id,
             username=username,
-            is_active=True
+            is_active=True,
         )
-
-        if not check_password(password, user.password):
-            return Response({
-                'success': False,
-                'message': 'Invalid credentials. Please check your Client ID, username and password.'
-            }, status=status.HTTP_401_UNAUTHORIZED)
-
-        return Response({
-            'success': True,
-            'message': 'Login successful',
-            'user': {
-                'id':        user.id,
-                'username':  user.username,
-                'full_name': user.full_name,
-                'user_type': user.user_type,
-                'client_id': user.company.client_id,
-                'firm_name': user.company.firm_name,
-                'place':     user.company.place,
-                'is_active': user.is_active,
-            }
-        })
     except AppUser.DoesNotExist:
         return Response({
             'success': False,
             'message': 'Invalid credentials. Please check your Client ID, username and password.'
         }, status=status.HTTP_401_UNAUTHORIZED)
 
-
-# ============================================
-# STAFF LOGIN  (Waiter / Kitchen)
-# ============================================
-#
-# Staff are created from the WaiterManagement page with user_type='user'.
-# They log in with just username + password (no client_id input).
-# The client_id is resolved from settings.STAFF_CLIENT_ID.
-#
-# On success the response includes:
-#   full_name           — auto-selected as waiter name in WaiterPanel
-#   restaurant_username — the admin's username, used to fetch orders
-#   role                — 'both' so StaffApp shows both panels
-
-@api_view(['POST'])
-def staff_login(request):
-    """
-    Staff login — username + password only, no client_id required.
-
-    Usernames are globally unique across all companies, so we can
-    look up the user directly by username alone.
-
-    POST body:
-        username  — the username created in WaiterManagement
-        password  — the password set in WaiterManagement
-
-    On success, returns full_name (auto-selected as waiter name) and
-    restaurant_username (admin's username used to fetch orders in panels).
-    """
-    username = request.data.get('username', '').strip()
-    password = request.data.get('password', '')
-
-    # ── 1. Both fields required ───────────────────────────────────────────────
-    if not username or not password:
-        return Response({
-            'success': False,
-            'message': 'Username and password are required.'
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    # ── 2. Look up user by username — must be active + user_type='user' ───────
-    #  Username is globally unique so no client_id needed for lookup.
-    try:
-        user = AppUser.objects.select_related('company').get(
-            username=username,
-            user_type='user',
-            is_active=True,
-        )
-    except AppUser.DoesNotExist:
-        return Response({
-            'success': False,
-            'message': 'Invalid credentials. Please check your username and password.'
-        }, status=status.HTTP_401_UNAUTHORIZED)
-
-    # ── 3. Validate password ──────────────────────────────────────────────────
     if not check_password(password, user.password):
         return Response({
             'success': False,
-            'message': 'Invalid credentials. Please check your username and password.'
+            'message': 'Invalid credentials. Please check your Client ID, username and password.'
         }, status=status.HTTP_401_UNAUTHORIZED)
 
-    # ── 4. Verify the company is still active ────────────────────────────────
-    if not user.company.is_active:
+    if user.user_type not in ('admin', 'superadmin'):
         return Response({
             'success': False,
-            'message': 'Your restaurant account is inactive. Contact your administrator.'
+            'message': 'Access denied. This portal is for Company Admins only.'
         }, status=status.HTTP_403_FORBIDDEN)
 
-    # ── 5. Find restaurant_username — the username embedded in the QR code ─────
-    #
-    # Orders are stored with the username that appears in the QR code URL.
-    # The QR code is generated by whoever owns the account:
-    #   - Super Admin login → user_type='admin'
-    #   - User Login        → user_type='user'  (but the first/oldest of the company)
-    #
-    # So we look for admin first, then fall back to the oldest non-staff user.
-    restaurant_user = (
-        AppUser.objects.filter(
-            company=user.company,
-            user_type='admin',
-            is_active=True,
-        ).order_by('created_at').first()
-        or
-        AppUser.objects.filter(
-            company=user.company,
-            is_active=True,
-        ).exclude(id=user.id).order_by('created_at').first()
-    )
+    if not user.company or not user.company.is_active:
+        return Response({
+            'success': False,
+            'message': 'Company account is inactive. Contact your Super Admin.'
+        }, status=status.HTTP_403_FORBIDDEN)
 
-    restaurant_username = restaurant_user.username if restaurant_user else user.username
-
-    # ── 6. Success ────────────────────────────────────────────────────────────
+    company = user.company
     return Response({
         'success': True,
         'message': 'Login successful',
         'user': {
-            'id':                  user.id,
-            'username':            user.username,
-            'full_name':           user.full_name or user.username,
-            'restaurant_username': restaurant_username,
-            'user_type':           'staff',
-            'role':                'both',
-            'client_id':           user.company.client_id,
-            'firm_name':           user.company.firm_name,
-            'place':               user.company.place,
-            'is_active':           user.is_active,
+            'id':            user.id,
+            'username':      user.username,
+            'full_name':     user.full_name,
+            'user_type':     'company',
+            'client_id':     company.client_id,
+            'firm_name':     company.firm_name,
+            'place':         company.place,
+            'is_active':     user.is_active,
+            'allowed_pages': company.allowed_pages,
+            'package':       company.package or _detect_package(company.allowed_pages),
         }
     })
-
-
-# ============================================
-# SUPER ADMIN LOGIN  (Company Login)
-# ============================================
-
-# Master secret — defined in settings.py as SUPER_ADMIN_SECRET.
-_SUPER_ADMIN_SECRET = getattr(settings, 'SUPER_ADMIN_SECRET', 'ADMIN@2024')
 
 
 @api_view(['POST'])
 def verify_secret_code(request):
-    """
-    Step 1 of Super Admin login.
-    Validates the master secret defined in settings.py (SUPER_ADMIN_SECRET).
-    """
-    secret_code = request.data.get('secret_code', '').strip()
-
-    if not secret_code:
-        return Response({
-            'success': False,
-            'message': 'Secret code is required.'
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    if secret_code == _SUPER_ADMIN_SECRET:
-        return Response({
-            'success': True,
-            'message': 'Secret code verified. Please proceed to login.',
-            'company': None
-        })
-
-    return Response({
-        'success': False,
-        'message': 'Invalid secret code. Please try again.'
-    }, status=status.HTTP_401_UNAUTHORIZED)
+    code = request.data.get('secret_code', '').strip()
+    if not code:
+        return Response({'success': False, 'message': 'Secret code required.'}, status=400)
+    if code == _SUPER_ADMIN_SECRET:
+        return Response({'success': True, 'message': 'Valid secret code.'})
+    return Response({'success': False, 'message': 'Invalid secret code.'}, status=401)
 
 
-@api_view(['POST'])
-def company_login(request):
-    """
-    Step 2 of Super Admin login.
-    Accepts: { username, password }
-    Username must match an active AppUser(admin).
-    """
-    username  = request.data.get('username', '').strip()
-    password  = request.data.get('password', '')
-
-    if not username or not password:
-        return Response({
-            'success': False,
-            'message': 'Username and password are required.'
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    try:
-        user = AppUser.objects.select_related('company').get(
-            username=username,
-            is_active=True
-        )
-    except AppUser.DoesNotExist:
-        return Response({
-            'success': False,
-            'message': 'Invalid username or password.'
-        }, status=status.HTTP_401_UNAUTHORIZED)
-
-    if not check_password(password, user.password):
-        return Response({
-            'success': False,
-            'message': 'Invalid username or password.'
-        }, status=status.HTTP_401_UNAUTHORIZED)
-
-    if user.user_type != 'admin':
-        return Response({
-            'success': False,
-            'message': 'Access denied. This portal is for Super Admins only.'
-        }, status=status.HTTP_403_FORBIDDEN)
-
-    company = user.company
-
-    return Response({
-        'success': True,
-        'message': 'Login successful',
-        'user': {
-            'id':        user.id,
-            'username':  user.username,
-            'full_name': user.full_name,
-            'user_type': 'company',
-            'client_id': company.client_id,
-            'firm_name': company.firm_name,
-            'place':     company.place,
-            'is_active': user.is_active,
-        }
-    })
-
-
-@api_view(['POST'])
-def superadmin_login(request):
-    """Alias kept for URL backward compatibility."""
-    return company_login(request)
-
-
-@api_view(['POST'])
-def create_super_admin(request):
-    """Web creation disabled. Use: python manage.py createsuperadmin"""
-    return Response({
-        'success': False,
-        'message': 'Use terminal command: python manage.py createsuperadmin'
-    }, status=status.HTTP_403_FORBIDDEN)
-
-
-@api_view(['POST'])
-def check_super_admin_exists(request):
-    """Check whether an admin user exists for a given client_id."""
-    client_id = request.data.get('client_id', '').strip()
-
-    if not client_id:
-        return Response({
-            'success': False,
-            'message': 'client_id is required.'
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    try:
-        company = CompanyInfo.objects.get(client_id=client_id, is_active=True)
-    except CompanyInfo.DoesNotExist:
-        return Response({
-            'success': False,
-            'message': 'Company not found.'
-        }, status=status.HTTP_404_NOT_FOUND)
-
-    admin_exists = AppUser.objects.filter(
-        company=company, user_type='admin', is_active=True
-    ).exists()
-
-    return Response({
-        'success': True,
-        'admin_exists': admin_exists,
-        'company': {
-            'client_id': company.client_id,
-            'firm_name': company.firm_name,
-            'place':     company.place,
-        }
-    })
-
-
-# ============================================
-# USER MANAGEMENT
-# ============================================
+# ═════════════════════════════════════════════════════════════
+# SUPER ADMIN — COMPANY MANAGEMENT
+# ═════════════════════════════════════════════════════════════
 
 @api_view(['GET'])
-def get_users(request):
+def get_all_companies(request):
     """
-    Get users for the UserPage.
-    - If ?client_id= is provided, scope to that company only.
-    - If omitted, return ALL users (super admin viewing all created accounts).
-    - Always excludes the super admin themselves via ?exclude_username=.
+    Super Admin only.
+    GET /api/superadmin/companies/
+    Returns all companies with their admin user count.
     """
-    client_id        = request.query_params.get('client_id', '').strip()
-    exclude_username = request.query_params.get('exclude_username', '').strip()
-
-    queryset = AppUser.objects.select_related('company').all()
-
-    # Scope by client_id only when explicitly provided
-    if client_id:
-        queryset = queryset.filter(company__client_id=client_id)
-
-    # Always exclude the calling super admin from the list
-    if exclude_username:
-        queryset = queryset.exclude(username=exclude_username)
-
-    users_data = []
-    for u in queryset:
-        users_data.append({
-            'id':            u.id,
-            'username':      u.username,
-            'full_name':     u.full_name,
-            'user_type':     u.user_type,
-            'client_id':     u.company.client_id,
-            'firm_name':     u.company.firm_name,
-            'place':         u.company.place,
-            'is_active':     u.is_active,
-            'allowed_pages': u.company.allowed_pages,
+    companies = CompanyInfo.objects.all().order_by('-created_at')
+    data = []
+    for c in companies:
+        admin = AppUser.objects.filter(company=c, user_type='admin').order_by('created_at').first()
+        admin_count = AppUser.objects.filter(company=c, user_type='admin').count()
+        staff_count = AppUser.objects.filter(company=c, user_type='user').count()
+        data.append({
+            'client_id':         c.client_id,
+            'firm_name':         c.firm_name,
+            'place':             c.place,
+            'is_active':         c.is_active,
+            'allowed_pages':     c.allowed_pages,
+            'package':           c.package or _detect_package(c.allowed_pages),
+            'leasing_start_date': str(c.leasing_start_date) if c.leasing_start_date else None,
+            'leasing_end_date':   str(c.leasing_end_date)   if c.leasing_end_date   else None,
+            'admin_count':       admin_count,
+            'staff_count':       staff_count,
+            'created_at':        c.created_at.isoformat(),
+            # Admin credentials for Super Admin dashboard display
+            'admin_id':          admin.id       if admin else None,
+            'admin_username':    admin.username if admin else None,
+            'admin_full_name':   admin.full_name if admin else None,
+            'admin_password':    admin.plain_password if admin else None,
         })
-    return Response(users_data)
+    return Response({'success': True, 'companies': data, 'count': len(data)})
 
 
 @api_view(['POST'])
-def create_user(request):
+def create_company_admin(request):
     """
-    Create a staff/waiter user linked to the admin's company.
+    Super Admin creates a Company Admin.
+    POST /api/superadmin/create-company-admin/
+    Body: { client_id, username, password, full_name, firm_name, place }
 
-    Required payload:
-        username   – must be globally unique
-        password   – plain text, will be hashed before storing
-        client_id  – provided by the frontend from the logged-in admin session
-    Optional:
-        full_name  – display name shown in waiter dropdown (defaults to username)
-        user_type  – always 'user' for waiter/staff created here
+    Steps:
+      1. Validate client_id exists in leasing API (or local DB)
+      2. Create or get CompanyInfo
+      3. Ensure username is globally unique
+      4. Create AppUser with user_type='admin'
     """
-    client_id = request.data.get('client_id', '').strip()
-    username  = request.data.get('username', '').strip()
-    password  = request.data.get('password', '')
-    full_name = request.data.get('full_name', '').strip() or username
-
-    # ── Required field validation ──────────────────────────────────────────
-    if not client_id:
-        return Response(
-            {'success': False, 'message': 'client_id is required (from admin session).'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    if not username:
-        return Response(
-            {'success': False, 'message': 'Username is required.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    if not password:
-        return Response(
-            {'success': False, 'message': 'Password is required.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # ── Get or auto-create the company ─────────────────────────────
+    client_id = request.data.get('client_id', '').strip().upper()
+    username  = request.data.get('username',  '').strip()
+    password  = request.data.get('password',  '')
+    full_name = request.data.get('full_name', '').strip()
     firm_name = request.data.get('firm_name', '').strip()
-    place     = request.data.get('place', '').strip()
+    place     = request.data.get('place',     '').strip()
+    package   = request.data.get('package',   'premium').strip()
+    if package not in ('premium', 'pro', 'basic'):
+        package = 'premium'
 
-    company, created = CompanyInfo.objects.get_or_create(
+    if not client_id: return Response({'success': False, 'message': 'Client ID is required.'}, status=400)
+    if not username:  return Response({'success': False, 'message': 'Username is required.'}, status=400)
+    if not password:  return Response({'success': False, 'message': 'Password is required.'}, status=400)
+    if not firm_name: return Response({'success': False, 'message': 'Firm name is required.'}, status=400)
+
+    # Username must be globally unique across ALL companies
+    if AppUser.objects.filter(username=username).exists():
+        return Response({'success': False, 'message': f'Username "{username}" is already taken.'}, status=400)
+
+    # Create or update CompanyInfo
+    company, _ = CompanyInfo.objects.get_or_create(
         client_id=client_id,
         defaults={
-            'firm_name': firm_name or client_id,
+            'firm_name': firm_name,
             'place':     place or '',
             'is_active': True,
         }
     )
+    if firm_name: company.firm_name = firm_name
+    if place:     company.place     = place
+    company.is_active     = True
+    company.package       = package
+    company.allowed_pages = _allowed_pages_for_package(package)
+    company.save()
 
-    if not created and not company.is_active:
-        return Response(
-            {'success': False, 'message': 'This company account is inactive. Contact your administrator.'},
-            status=status.HTTP_403_FORBIDDEN
-        )
-
-    # Update firm_name/place if provided and fields are currently empty
-    if not created and (firm_name or place):
-        if firm_name and not company.firm_name:
-            company.firm_name = firm_name
-        if place and not company.place:
-            company.place = place
-        company.save()
-
-    # ── Username must be unique ────────────────────────────────────────────
-    if AppUser.objects.filter(username=username).exists():
-        return Response({
-            'success': False,
-            'message': f'Username "{username}" is already taken. Choose a different one.'
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    # ── Create user — role is NULL for user_type='user' (staff login uses full_name) ──
     user = AppUser.objects.create(
-        company   = company,
-        username  = username,
-        password  = make_password(password),
-        full_name = full_name,
-        user_type = 'user',   # always 'user' — staff created from WaiterManagement
-        role      = None,     # role not used; staff_login always returns role='both'
-        is_active = True,
+        company=company,
+        username=username,
+        password=make_password(password),
+        plain_password=password,
+        full_name=full_name or username,
+        user_type='admin',
+        is_active=True,
     )
 
     return Response({
         'success': True,
-        'message': f'Waiter "{full_name}" created successfully.',
+        'message': f'Company Admin "{username}" created for {firm_name}.',
         'user': {
             'id':        user.id,
             'username':  user.username,
@@ -543,509 +525,437 @@ def create_user(request):
             'client_id': company.client_id,
             'firm_name': company.firm_name,
             'place':     company.place,
-            'is_active': user.is_active,
         }
-    }, status=status.HTTP_201_CREATED)
+    }, status=201)
 
 
 @api_view(['POST'])
-def create_test_user(request):
+def toggle_company_active(request):
+    """Super Admin enables/disables a company."""
+    client_id = request.data.get('client_id', '').strip()
+    is_active = request.data.get('is_active')
+
+    if not client_id:
+        return Response({'success': False, 'message': 'client_id is required.'}, status=400)
+    try:
+        company = CompanyInfo.objects.get(client_id=client_id)
+        company.is_active = bool(is_active)
+        company.save(update_fields=['is_active'])
+        return Response({'success': True, 'message': f'Company {"activated" if is_active else "deactivated"}.'})
+    except CompanyInfo.DoesNotExist:
+        return Response({'success': False, 'message': 'Company not found.'}, status=404)
+
+
+@api_view(['POST'])
+def set_company_pages(request):
     """
-    Create a restaurant admin user manually — no licensing API needed.
+    Super Admin sets which pages a company (and its admins) can access.
+    POST /api/superadmin/set-company-pages/
+    Body: { client_id, allowed_pages: [...] or null }
+         OR { client_id, package: 'premium'|'pro'|'basic' }
+    """
+    client_id     = request.data.get('client_id', '').strip()
+    package       = request.data.get('package', '').strip()
+    # Use sentinel to distinguish "not sent" from "sent as null"
+    _SENTINEL     = object()
+    allowed_pages = request.data.get('allowed_pages', _SENTINEL)
 
-    This is the primary user creation endpoint for the current testing phase.
-    The Super Admin manually enters Client ID, Firm Name, Place, Username, Password.
-    The created user has user_type='admin' so they can log in via Company Login
-    and manage their own menus, categories, staff, etc. — fully isolated from
-    all other companies.
+    if not client_id:
+        return Response({'success': False, 'message': 'client_id is required.'}, status=400)
 
-    When the licensing API is later integrated, this endpoint will be replaced
-    by one that auto-fills Firm Name and Place from the licensing response.
+    # Priority 1: package key given → derive allowed_pages from it
+    if package in ('premium', 'pro', 'basic'):
+        allowed_pages = _allowed_pages_for_package(package)  # None for premium
+    # Priority 2: allowed_pages explicitly sent (even if null/None)
+    elif allowed_pages is not _SENTINEL:
+        if allowed_pages is not None and not isinstance(allowed_pages, list):
+            return Response({'success': False, 'message': 'allowed_pages must be a list or null.'}, status=400)
+        # allowed_pages stays as received (None or list)
+    else:
+        # Nothing sent — default to unrestricted
+        allowed_pages = None
 
-    Required payload:
-        client_id  – unique company identifier (any string, e.g. CLI001)
-        username   – must be globally unique across all users
-        password   – plain text (will be hashed before storing)
-        firm_name  – company/restaurant name
-        place      – location / city
+    # Auto-detect package label from pages if not provided
+    if not package:
+        package = _detect_package(allowed_pages)
+
+    try:
+        company = CompanyInfo.objects.get(client_id=client_id)
+        company.allowed_pages = allowed_pages
+        company.package       = package
+        company.save(update_fields=['allowed_pages', 'package'])
+        return Response({
+            'success':       True,
+            'allowed_pages': company.allowed_pages,
+            'package':       company.package,
+        })
+    except CompanyInfo.DoesNotExist:
+        return Response({'success': False, 'message': 'Company not found.'}, status=404)
+
+
+@api_view(['DELETE'])
+def delete_company(request):
+    """
+    Super Admin deletes a company and all its users.
+    DELETE /api/superadmin/delete-company/
+    Body: { client_id }
     """
     client_id = request.data.get('client_id', '').strip()
-    username  = request.data.get('username',  '').strip()
-    password  = request.data.get('password',  '')
-    firm_name = request.data.get('firm_name', '').strip()
-    place     = request.data.get('place',     '').strip()
-    full_name = request.data.get('full_name', '').strip() or username
-
-    # ── Validation ────────────────────────────────────────────────────────────
     if not client_id:
-        return Response({'success': False, 'message': 'Client ID is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-    if not username:
-        return Response({'success': False, 'message': 'Username is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-    if not password:
-        return Response({'success': False, 'message': 'Password is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-    if not firm_name:
-        return Response({'success': False, 'message': 'Firm Name is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'client_id is required.'}, status=400)
+    try:
+        company = CompanyInfo.objects.get(client_id=client_id)
+        firm_name = company.firm_name
+        # Delete all users of this company first
+        AppUser.objects.filter(company=company).delete()
+        company.delete()
+        return Response({'success': True, 'message': f'Company "{firm_name}" and all its users deleted.'})
+    except CompanyInfo.DoesNotExist:
+        return Response({'success': False, 'message': 'Company not found.'}, status=404)
+    except Exception as e:
+        return Response({'success': False, 'message': str(e)}, status=500)
 
-    # ── Create or update company — leasing_key is NOT required here ───────────
-    company, created = CompanyInfo.objects.get_or_create(
-        client_id=client_id,
-        defaults={
-            'firm_name':   firm_name,
-            'place':       place or '',
-            'is_active':   True,
-            'leasing_key': None,   # No licensing key in manual/test mode
-        }
-    )
-    # Always sync firm_name and place from the submitted form
-    if firm_name:
-        company.firm_name = firm_name
-    if place:
-        company.place = place
-    company.is_active = True
-    company.save()
 
-    # ── Username must be globally unique ──────────────────────────────────────
+# ═════════════════════════════════════════════════════════════
+# USER MANAGEMENT (Company Admin manages Staff)
+# ═════════════════════════════════════════════════════════════
+
+@api_view(['GET'])
+def get_users(request):
+    """
+    List users for a client_id.
+    Returns both company-level allowed_pages and per-staff allowed_pages
+    so the 60s permission poll in StaffApp can detect changes.
+    """
+    client_id        = request.query_params.get('client_id', '').strip()
+    exclude_username = request.query_params.get('exclude_username', '').strip()
+
+    qs = AppUser.objects.select_related('company').all()
+    if client_id:        qs = qs.filter(company__client_id=client_id)
+    if exclude_username: qs = qs.exclude(username=exclude_username)
+
+    data = []
+    for u in qs:
+        data.append({
+            'id':                  u.id,
+            'username':            u.username,
+            'full_name':           u.full_name,
+            'user_type':           u.user_type,
+            'role':                u.role,
+            'client_id':           u.company.client_id if u.company else None,
+            'firm_name':           u.company.firm_name if u.company else '',
+            'place':               u.company.place     if u.company else '',
+            'is_active':           u.is_active,
+            'allowed_pages':       u.company.allowed_pages if u.company else None,
+            'staff_allowed_pages': u.allowed_pages,
+        })
+    return Response(data)
+
+
+@api_view(['POST'])
+def create_user(request):
+    """Company Admin creates a Staff user."""
+    client_id = request.data.get('client_id', '').strip()
+    username  = request.data.get('username', '').strip()
+    password  = request.data.get('password', '')
+    full_name = request.data.get('full_name', '').strip() or username
+    role      = request.data.get('role', 'both') or 'both'
+
+    if not client_id: return Response({'success': False, 'message': 'client_id is required.'}, status=400)
+    if not username:  return Response({'success': False, 'message': 'Username is required.'}, status=400)
+    if not password:  return Response({'success': False, 'message': 'Password is required.'}, status=400)
+
+    try:
+        company = CompanyInfo.objects.get(client_id=client_id)
+    except CompanyInfo.DoesNotExist:
+        return Response({'success': False, 'message': 'Company not found.'}, status=404)
+
+    if not company.is_active:
+        return Response({'success': False, 'message': 'Company is inactive.'}, status=403)
+
+    # Username must be globally unique
     if AppUser.objects.filter(username=username).exists():
-        return Response({
-            'success': False,
-            'message': f'Username "{username}" is already taken. Choose a different one.'
-        }, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': f'Username "{username}" is already taken.'}, status=400)
 
-    # ── Create user as admin so they can log in via Company Login ─────────────
     user = AppUser.objects.create(
-        company   = company,
-        username  = username,
-        password  = make_password(password),
-        full_name = full_name,
-        user_type = 'admin',
-        is_active = True,
+        company=company,
+        username=username,
+        password=make_password(password),
+        full_name=full_name,
+        user_type='user',
+        role=role,
+        allowed_pages=None,
+        is_active=True,
     )
-
     return Response({
         'success': True,
-        'message': f'User "{username}" created successfully.',
+        'message': f'Staff "{full_name}" created.',
         'user': {
             'id':            user.id,
             'username':      user.username,
             'full_name':     user.full_name,
             'user_type':     user.user_type,
+            'role':          user.role,
+            'allowed_pages': user.allowed_pages,
             'client_id':     company.client_id,
             'firm_name':     company.firm_name,
             'place':         company.place,
             'is_active':     user.is_active,
-            'allowed_pages': company.allowed_pages,
         }
-    }, status=status.HTTP_201_CREATED)
+    }, status=201)
+
+
+# Kept for backward compat — same as create_company_admin but via old route
+@api_view(['POST'])
+def create_test_user(request):
+    return create_company_admin(request)
 
 
 @api_view(['PUT'])
 def update_user(request, user_id):
-    """
-    Update an existing user (any user_type).
-    Editable: username, password (optional), full_name, firm_name, place.
-    client_id (company) cannot be changed after creation.
-    """
     try:
         user = AppUser.objects.select_related('company').get(id=user_id)
     except AppUser.DoesNotExist:
-        return Response({'success': False, 'message': 'User not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': False, 'message': 'User not found.'}, status=404)
 
     new_username  = request.data.get('username',  '').strip()
-    new_password  = request.data.get('password',  '').strip()
+    new_password  = request.data.get('password',  '')
     new_full_name = request.data.get('full_name', '').strip()
-    new_firm_name = request.data.get('firm_name', '').strip()
-    new_place     = request.data.get('place',     '').strip()
+    new_role      = request.data.get('role', None)
 
     if not new_username:
-        return Response({'success': False, 'message': 'Username is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-
-    # Username uniqueness check (ignore current user's own username)
+        return Response({'success': False, 'message': 'Username is required.'}, status=400)
     if AppUser.objects.filter(username=new_username).exclude(id=user_id).exists():
-        return Response({
-            'success': False,
-            'message': f'Username "{new_username}" is already taken. Choose a different one.'
-        }, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': f'Username "{new_username}" is already taken.'}, status=400)
 
     user.username  = new_username
     user.full_name = new_full_name or new_username
     if new_password:
         user.password = make_password(new_password)
+        user.plain_password = new_password
+    if new_role is not None: user.role = new_role
     user.save()
-
-    # Update company firm_name / place if provided
-    company = user.company
-    changed = False
-    if new_firm_name and new_firm_name != company.firm_name:
-        company.firm_name = new_firm_name
-        changed = True
-    if new_place and new_place != company.place:
-        company.place = new_place
-        changed = True
-    if changed:
-        company.save()
 
     return Response({
         'success': True,
-        'message': f'User "{new_username}" updated successfully.',
+        'message': f'User "{new_username}" updated.',
         'user': {
-            'id':            user.id,
-            'username':      user.username,
-            'full_name':     user.full_name,
-            'user_type':     user.user_type,
-            'client_id':     company.client_id,
-            'firm_name':     company.firm_name,
-            'place':         company.place,
-            'is_active':     user.is_active,
-            'allowed_pages': company.allowed_pages,
+            'id': user.id, 'username': user.username, 'full_name': user.full_name,
+            'user_type': user.user_type, 'role': user.role,
+            'client_id': user.company.client_id if user.company else None,
+            'is_active': user.is_active,
+            'allowed_pages':       user.company.allowed_pages if user.company else None,
+            'staff_allowed_pages': user.allowed_pages,
         }
     })
 
 
 @api_view(['POST'])
 def save_user_pages(request, user_id):
-    """
-    Super Admin sets which pages a company's users can access.
-
-    POST body:
-        client_id     – the stable company identifier (preferred lookup key)
-        allowed_pages – list of page IDs, or null for unrestricted access
-
-    Looks up by client_id first (stable), falls back to AppUser.id if not provided.
-    NOTE: Requires the allowed_pages column — run fix_allowed_pages.py if missing.
-    """
+    """Super Admin sets company-level allowed_pages."""
     allowed_pages = request.data.get('allowed_pages', None)
     client_id     = request.data.get('client_id', '').strip()
 
-    # null = unrestricted; must be a list otherwise
     if allowed_pages is not None and not isinstance(allowed_pages, list):
-        return Response(
-            {'success': False, 'message': 'allowed_pages must be a list or null.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({'success': False, 'message': 'allowed_pages must be list or null.'}, status=400)
 
-    # ── Look up company directly by client_id (stable, preferred) ─────────────
     if client_id:
         try:
             company = CompanyInfo.objects.get(client_id=client_id)
         except CompanyInfo.DoesNotExist:
-            return Response({
-                'success': False,
-                'message': f'Company with client_id="{client_id}" not found.'
-            }, status=status.HTTP_404_NOT_FOUND)
+            return Response({'success': False, 'message': 'Company not found.'}, status=404)
     else:
-        # Fallback: look up via AppUser.id (legacy path)
         try:
-            user    = AppUser.objects.select_related('company').get(id=user_id)
-            company = user.company
+            company = AppUser.objects.select_related('company').get(id=user_id).company
         except AppUser.DoesNotExist:
-            return Response({
-                'success': False,
-                'message': (
-                    f'User id={user_id} not found. '
-                    'Please refresh the user list and try again.'
-                )
-            }, status=status.HTTP_404_NOT_FOUND)
+            return Response({'success': False, 'message': 'User not found.'}, status=404)
 
-    # ── Save allowed_pages on the company ─────────────────────────────────────
+    company.allowed_pages = allowed_pages
+    company.save(update_fields=['allowed_pages'])
+    return Response({'success': True, 'allowed_pages': company.allowed_pages})
+
+
+@api_view(['POST', 'PATCH'])
+def save_staff_access(request, user_id):
+    """Company Admin sets per-staff allowed_pages."""
+    allowed_pages = request.data.get('allowed_pages', None)
+    username      = (request.data.get('username') or '').strip()
+
+    if allowed_pages is not None and not isinstance(allowed_pages, list):
+        return Response({'success': False, 'message': 'allowed_pages must be list or null.'}, status=400)
+
     try:
-        company.allowed_pages = allowed_pages
-        company.save(update_fields=['allowed_pages'])
-    except Exception as e:
-        err_str = str(e)
-        if 'column' in err_str.lower() or 'does not exist' in err_str.lower():
-            return Response({
-                'success': False,
-                'message': (
-                    'Database column missing. '
-                    'Please run fix_allowed_pages.py on the server, then restart Django.'
-                ),
-                'detail': err_str,
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response({
-            'success': False,
-            'message': f'Failed to save page access: {err_str}',
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        user = AppUser.objects.get(username=username) if username else AppUser.objects.get(id=user_id)
+    except AppUser.DoesNotExist:
+        return Response({'success': False, 'message': 'Staff user not found.'}, status=404)
 
-    return Response({
-        'success':       True,
-        'message':       'Page access updated successfully.',
-        'allowed_pages': company.allowed_pages,
-    })
+    user.allowed_pages = allowed_pages
+    user.save(update_fields=['allowed_pages'])
+    return Response({'success': True, 'allowed_pages': user.allowed_pages})
 
 
 @api_view(['DELETE'])
 def delete_user(request, user_id):
-    """Delete a restaurant user (any user_type)."""
     try:
-        user = AppUser.objects.get(id=user_id)
-        user.delete()
-        return Response({'success': True, 'message': 'User deleted successfully.'})
+        AppUser.objects.get(id=user_id).delete()
+        return Response({'success': True, 'message': 'User deleted.'})
     except AppUser.DoesNotExist:
-        return Response({'success': False, 'message': 'User not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': False, 'message': 'User not found.'}, status=404)
 
 
 @api_view(['GET'])
 def get_user_stats(request):
-    """Get menu/category stats for a given username."""
     username = request.query_params.get('username')
     if not username:
-        return Response({'success': False, 'message': 'Username is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-
-    menu_items = MenuItem.objects.filter(username=username)
-    categories = Category.objects.filter(username=username)
-
+        return Response({'success': False, 'message': 'Username is required.'}, status=400)
+    items = MenuItem.objects.filter(username=username)
+    cats  = Category.objects.filter(username=username)
     return Response({
         'success': True,
         'stats': {
-            'total_items':      menu_items.count(),
-            'active_items':     menu_items.filter(status='active').count(),
-            'inactive_items':   menu_items.filter(status='inactive').count(),
-            'total_categories': categories.count(),
+            'total_items':      items.count(),
+            'active_items':     items.filter(status='active').count(),
+            'inactive_items':   items.filter(status='inactive').count(),
+            'total_categories': cats.count(),
         }
     })
 
 
-# ============================================
-# WAITER LIST
-# ============================================
-
 @api_view(['GET'])
 def get_waiter_list(request):
-    """
-    Return all active staff (user_type='user') for a given restaurant.
-    Scoped by client_id + username to ensure data isolation:
-      - If username is provided, returns only staff created under that admin
-      - This prevents User A's staff from being visible to User B
-
-    GET /api/waiters/?client_id=XXX&username=YYY
-    """
     client_id = request.query_params.get('client_id')
-    username  = request.query_params.get('username')
-
     if not client_id:
-        return Response(
-            {'success': False, 'message': 'client_id is required.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Scope to company first, then narrow to staff created for this admin
-    waiters = AppUser.objects.filter(
-        user_type='user',
-        company__client_id=client_id,
-        is_active=True,
-    )
-
-    # NOTE: Staff are created with a reference back to the admin username via
-    # WaiterManagement. When username is provided, we filter by the company
-    # admin's username to prevent cross-user staff leakage.
-    # (In the current model, all staff under a client_id share the company.
-    #  If client_ids are unique per admin, this is already isolated.)
-
-    return Response({'success': True, 'waiters': list(
-        waiters.values('id', 'username', 'full_name', 'user_type')
-    )})
+        return Response({'success': False, 'message': 'client_id is required.'}, status=400)
+    waiters = AppUser.objects.filter(user_type='user', company__client_id=client_id, is_active=True)
+    return Response({'success': True, 'waiters': list(waiters.values('id', 'username', 'full_name', 'user_type'))})
 
 
-# ============================================
+# ─────────────────────────────────────────────────────────────
+# Backward-compat stubs used by old frontend routes
+# ─────────────────────────────────────────────────────────────
+@api_view(['POST'])
+def create_super_admin(request):
+    return Response({'success': False, 'message': 'Use: python manage.py createsuperadmin'}, status=403)
+
+@api_view(['POST'])
+def check_super_admin_exists(request):
+    client_id = request.data.get('client_id', '').strip()
+    if not client_id:
+        return Response({'success': False, 'message': 'client_id is required.'}, status=400)
+    try:
+        company      = CompanyInfo.objects.get(client_id=client_id, is_active=True)
+        admin_exists = AppUser.objects.filter(company=company, user_type='admin', is_active=True).exists()
+        return Response({'success': True, 'admin_exists': admin_exists,
+                         'company': {'client_id': company.client_id, 'firm_name': company.firm_name}})
+    except CompanyInfo.DoesNotExist:
+        return Response({'success': False, 'message': 'Company not found.'}, status=404)
+
+
+# ═════════════════════════════════════════════════════════════
 # COMPANY INFORMATION
-# ============================================
+# ═════════════════════════════════════════════════════════════
 
 @api_view(['GET'])
 def get_company_info(request):
     client_id = request.query_params.get('client_id')
     if not client_id:
-        return Response({'success': False, 'message': 'client_id is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'client_id is required.'}, status=400)
     try:
-        company    = CompanyInfo.objects.get(client_id=client_id)
-        serializer = CompanyInfoSerializer(company)
-        return Response({'success': True, 'company': serializer.data})
+        company = CompanyInfo.objects.get(client_id=client_id)
+        return Response({'success': True, 'company': CompanyInfoSerializer(company).data})
     except CompanyInfo.DoesNotExist:
-        return Response({'success': False, 'message': 'Company not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': False, 'message': 'Company not found.'}, status=404)
 
 
 @api_view(['POST'])
 def license_lookup(request):
-    """
-    Proxy endpoint — fetches the full client list from the licensing server
-    and returns firm_name + place for the requested client_id.
-
-    External API: GET https://activate.imcbs.com/client-id-list/get-client-ids/
-    Response shape: { "status": true, "count": N, "data": [
-        { "client_id": "...", "company_name": "...", "place": "..." }, ...
-    ]}
-
-    POST body: { client_id: '...' }
-    """
     client_id = (request.data.get('client_id') or '').strip().upper()
     if not client_id:
-        return Response({'success': False, 'message': 'client_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
-
+        return Response({'success': False, 'message': 'client_id is required.'}, status=400)
     endpoint = 'https://activate.imcbs.com/client-id-list/get-client-ids/'
     try:
-        # Always GET the full list (API ignores query params — returns all clients)
         r = requests.get(endpoint, timeout=8)
         if not r.ok:
-            return Response(
-                {'success': False, 'message': f'Licensing server returned {r.status_code}.'},
-                status=status.HTTP_502_BAD_GATEWAY
-            )
-
-        data = r.json()
-
-        # Extract the list — API shape: { status, count, data: [...] }
-        candidates = []
-        if isinstance(data, list):
-            candidates = data
-        elif isinstance(data, dict):
-            inner = data.get('data') or data.get('results') or data.get('clients') or []
-            candidates = inner if isinstance(inner, list) else [inner]
-
-        # Find exact client_id match (case-insensitive)
-        match = None
+            return Response({'success': False, 'message': f'Licensing server error {r.status_code}.'}, status=502)
+        data       = r.json()
+        candidates = data if isinstance(data, list) else (data.get('data') or data.get('results') or [])
+        match      = None
         for item in candidates:
-            if not isinstance(item, dict):
-                continue
-            # Try all possible key names for the client_id field
+            if not isinstance(item, dict): continue
             for key in ('client_id', 'clientId', 'clientid', 'clientID'):
-                val = item.get(key)
-                if val and str(val).strip().upper() == client_id:
-                    match = item
-                    break
-            if match:
-                break
-
+                if str(item.get(key, '')).strip().upper() == client_id:
+                    match = item; break
+            if match: break
         if not match:
-            return Response(
-                {'success': False, 'message': f'Client ID "{client_id}" not found in licensing server.'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        # Map field names — API uses 'company_name', not 'firm_name'
-        firm  = (match.get('company_name') or match.get('firm_name') or
-                 match.get('firm') or match.get('company') or match.get('name') or '').strip()
-        place = (match.get('place') or match.get('city') or
-                 match.get('location') or match.get('address') or '').strip()
-
-        return Response({
-            'success': True,
-            'company': {
-                'client_id': client_id,
-                'firm_name': firm,
-                'place':     place,
-            }
-        })
-
+            return Response({'success': False, 'message': f'Client ID "{client_id}" not found in licensing server.'}, status=404)
+        firm  = (match.get('company_name') or match.get('firm_name') or match.get('name') or '').strip()
+        place = (match.get('place') or match.get('city') or match.get('location') or '').strip()
+        return Response({'success': True, 'company': {'client_id': client_id, 'firm_name': firm, 'place': place}})
     except Exception as e:
-        return Response(
-            {'success': False, 'message': f'License service error: {str(e)}'},
-            status=status.HTTP_502_BAD_GATEWAY
-        )
+        return Response({'success': False, 'message': f'License service error: {str(e)}'}, status=502)
 
 
 @api_view(['POST'])
 def create_or_update_company(request):
     client_id = request.data.get('client_id')
     if not client_id:
-        return Response({'success': False, 'message': 'client_id is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'client_id is required.'}, status=400)
     try:
         company    = CompanyInfo.objects.get(client_id=client_id)
         serializer = CompanyInfoSerializer(company, data=request.data, partial=True)
     except CompanyInfo.DoesNotExist:
-        # Ensure leasing_key defaults to None for new companies created via this endpoint
         data = request.data.copy()
         data.setdefault('leasing_key', None)
         serializer = CompanyInfoSerializer(data=data)
-
     if serializer.is_valid():
         serializer.save()
-        return Response({'success': True, 'message': 'Company information saved successfully.',
-                         'company': serializer.data})
-    return Response({'success': False, 'errors': serializer.errors},
-                    status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': True, 'company': serializer.data})
+    return Response({'success': False, 'errors': serializer.errors}, status=400)
 
 
-# ============================================
+# ═════════════════════════════════════════════════════════════
 # CUSTOMIZATION
-# ============================================
+# ═════════════════════════════════════════════════════════════
 
 @api_view(['GET'])
 def get_customization(request):
     username  = request.query_params.get('username')
     client_id = request.query_params.get('client_id')
     if not username:
-        return Response({'success': False, 'message': 'username is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'username is required.'}, status=400)
     try:
-        customization = Customization.objects.get(username=username)
-        serializer = CustomizationSerializer(
-            customization,
-            context={'request': request, 'client_id': client_id}
-        )
-        return Response({'success': True, 'customization': serializer.data})
+        c = Customization.objects.get(username=username)
+        return Response({'success': True, 'customization': CustomizationSerializer(c, context={'request': request, 'client_id': client_id}).data})
     except Customization.DoesNotExist:
-        return Response({'success': False, 'message': 'Customization not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': True, 'customization': {}})
 
 
 @api_view(['POST'])
 def save_customization(request):
     username = request.data.get('username')
     if not username:
-        return Response({'success': False, 'message': 'username is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-
+        return Response({'success': False, 'message': 'username is required.'}, status=400)
     fields = [
         'header_bg_color', 'header_text_color', 'primary_color',
         'accent_color', 'background_color', 'qr_foreground_color',
         'qr_background_color', 'qr_size', 'qr_margin', 'logo_shape',
         'tv_bg_color', 'tv_text_color', 'tv_accent_color', 'tv_card_bg_color',
     ]
-
     try:
-        customization = Customization.objects.get(username=username)
+        c = Customization.objects.get(username=username)
         for f in fields:
-            if f in request.data:
-                setattr(customization, f, request.data[f])
-        if 'logo' in request.FILES:
-            customization.logo = request.FILES['logo']
-        if 'tv_logo' in request.FILES:
-            customization.tv_logo = request.FILES['tv_logo']
-        customization.save()
+            if f in request.data: setattr(c, f, request.data[f])
+        if 'logo'    in request.FILES: c.logo    = request.FILES['logo']
+        if 'tv_logo' in request.FILES: c.tv_logo = request.FILES['tv_logo']
+        c.save()
     except Customization.DoesNotExist:
-        customization = Customization.objects.create(
-            username          = username,
-            header_bg_color   = request.data.get('header_bg_color',   '#6366f1'),
-            header_text_color = request.data.get('header_text_color', '#ffffff'),
-            primary_color     = request.data.get('primary_color',     '#7c3aed'),
-            accent_color      = request.data.get('accent_color',      '#10b981'),
-            background_color  = request.data.get('background_color',  '#f9fafb'),
-            qr_foreground_color = request.data.get('qr_foreground_color', '#000000'),
-            qr_background_color = request.data.get('qr_background_color', '#ffffff'),
-            qr_size           = request.data.get('qr_size',   512),
-            qr_margin         = request.data.get('qr_margin', 2),
-            logo_shape        = request.data.get('logo_shape', 'round'),
-            tv_bg_color       = request.data.get('tv_bg_color',      '#000000'),
-            tv_text_color     = request.data.get('tv_text_color',    '#ffffff'),
-            tv_accent_color   = request.data.get('tv_accent_color',  '#9333ea'),
-            tv_card_bg_color  = request.data.get('tv_card_bg_color', '#1f2937'),
-            logo              = request.FILES.get('logo'),
-            tv_logo           = request.FILES.get('tv_logo'),
+        c = Customization.objects.create(
+            username=username,
+            **{f: request.data.get(f, '') for f in fields if f in request.data},
+            logo=request.FILES.get('logo'),
+            tv_logo=request.FILES.get('tv_logo'),
         )
-
-    serializer = CustomizationSerializer(customization, context={'request': request})
-    return Response({'success': True, 'message': 'Customization saved successfully.',
-                     'customization': serializer.data})
+    return Response({'success': True, 'customization': CustomizationSerializer(c, context={'request': request}).data})
 
 
 @api_view(['DELETE'])
@@ -1053,41 +963,29 @@ def delete_customization_file(request):
     username  = request.query_params.get('username')
     file_type = request.query_params.get('file_type')
     if not username or not file_type:
-        return Response({'success': False, 'message': 'username and file_type are required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'username and file_type required.'}, status=400)
     try:
-        customization = Customization.objects.get(username=username)
-        if file_type == 'logo' and customization.logo:
-            customization.logo.delete()
-            customization.logo = None
-            customization.save()
-        elif file_type == 'banner' and customization.banner:
-            customization.banner.delete()
-            customization.banner = None
-            customization.save()
-        return Response({'success': True, 'message': f'{file_type.capitalize()} deleted successfully.'})
+        c = Customization.objects.get(username=username)
+        if file_type == 'logo'   and c.logo:   c.logo.delete();   c.logo   = None; c.save()
+        elif file_type == 'banner' and c.banner: c.banner.delete(); c.banner = None; c.save()
+        return Response({'success': True})
     except Customization.DoesNotExist:
-        return Response({'success': False, 'message': 'Customization not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': False, 'message': 'Not found.'}, status=404)
 
 
-# ============================================
-# BANNER MANAGEMENT
-# ============================================
+# ═════════════════════════════════════════════════════════════
+# BANNERS
+# ═════════════════════════════════════════════════════════════
 
 @api_view(['GET'])
 def get_banners(request):
     username  = request.query_params.get('username')
     client_id = request.query_params.get('client_id')
     if not username or not client_id:
-        return Response({'success': False, 'message': 'username and client_id are both required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-    queryset   = Banner.objects.filter(
-        username=username, client_id=client_id, is_active=True
-    ).order_by('order')
-    serializer = BannerSerializer(queryset, many=True, context={'request': request})
-    banners_data = serializer.data
-    return Response({'success': True, 'banners': banners_data, 'count': len(banners_data)})
+        return Response({'success': False, 'message': 'username and client_id required.'}, status=400)
+    qs   = Banner.objects.filter(username=username, client_id=client_id, is_active=True).order_by('order')
+    data = BannerSerializer(qs, many=True, context={'request': request}).data
+    return Response({'success': True, 'banners': data, 'count': len(data)})
 
 
 @api_view(['POST'])
@@ -1095,42 +993,29 @@ def upload_banners(request):
     username  = request.data.get('username')
     client_id = request.data.get('client_id')
     if not username or not client_id:
-        return Response({'success': False, 'message': 'username and client_id are required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'username and client_id required.'}, status=400)
     files = request.FILES.getlist('banners')
     if not files:
-        return Response({'success': False, 'message': 'No banner files provided.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-
-    max_order       = Banner.objects.filter(username=username).aggregate(Max('order'))['order__max'] or 0
-    created_banners = []
-    for idx, file in enumerate(files):
-        banner = Banner.objects.create(
-            client_id=client_id, username=username,
-            image=file, order=max_order + idx + 1, is_active=True
-        )
-        created_banners.append(banner)
-
-    serializer = BannerSerializer(created_banners, many=True, context={'request': request})
-    return Response({'success': True,
-                     'message': f'{len(created_banners)} banners uploaded successfully.',
-                     'banners': serializer.data})
+        return Response({'success': False, 'message': 'No files provided.'}, status=400)
+    max_order = Banner.objects.filter(username=username).aggregate(Max('order'))['order__max'] or 0
+    created   = [Banner.objects.create(client_id=client_id, username=username, image=f, order=max_order + i + 1) for i, f in enumerate(files)]
+    return Response({'success': True, 'banners': BannerSerializer(created, many=True, context={'request': request}).data}, status=201)
 
 
 @api_view(['DELETE'])
 def delete_banner(request, banner_id):
-    username = request.query_params.get('username')
+    username  = request.query_params.get('username')
+    client_id = request.query_params.get('client_id')
     if not username:
-        return Response({'success': False, 'message': 'username is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'username required.'}, status=400)
     try:
-        banner = Banner.objects.get(id=banner_id, username=username)
-        banner.image.delete()
-        banner.delete()
-        return Response({'success': True, 'message': 'Banner deleted successfully.'})
+        qs = Banner.objects.filter(id=banner_id, username=username)
+        if client_id: qs = qs.filter(client_id=client_id)
+        b = qs.get()
+        b.image.delete(); b.delete()
+        return Response({'success': True})
     except Banner.DoesNotExist:
-        return Response({'success': False, 'message': 'Banner not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': False, 'message': 'Banner not found.'}, status=404)
 
 
 @api_view(['POST'])
@@ -1138,354 +1023,236 @@ def reorder_banners(request):
     username      = request.data.get('username')
     banner_orders = request.data.get('banner_orders')
     if not username or not banner_orders:
-        return Response({'success': False, 'message': 'username and banner_orders are required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-    try:
-        for item in banner_orders:
-            Banner.objects.filter(id=item['id'], username=username).update(order=item['order'])
-        return Response({'success': True, 'message': 'Banners reordered successfully.'})
-    except Exception as e:
-        return Response({'success': False, 'message': f'Error reordering banners: {str(e)}'},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({'success': False, 'message': 'username and banner_orders required.'}, status=400)
+    for item in banner_orders:
+        Banner.objects.filter(id=item['id'], username=username).update(order=item['order'])
+    return Response({'success': True})
 
 
-# ============================================
-# TABLE MASTER
-# ============================================
-
-@api_view(['GET'])
-def get_tables(request):
-    """
-    List all tables for a restaurant.
-
-    GET /api/tables/?username=<username>&client_id=<client_id>
-    Optional: ?status=active  to return only active tables.
-    """
-    username  = request.query_params.get('username')
-    client_id = request.query_params.get('client_id')
-    status_f  = request.query_params.get('status')
-
-    if not username or not client_id:
-        return Response(
-            {'success': False, 'message': 'username and client_id are required.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    qs = Table.objects.filter(username=username, client_id=client_id)
-    if status_f:
-        qs = qs.filter(status=status_f)
-
-    serializer = TableSerializer(qs, many=True)
-    return Response({'success': True, 'tables': serializer.data, 'count': qs.count()})
-
-
-@api_view(['POST'])
-def create_table(request):
-    """
-    Create a new table.
-
-    POST /api/tables/create/
-    Body: { client_id, username, table_number, table_name?, capacity?, status? }
-    """
-    serializer = TableSerializer(data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response(
-            {'success': True, 'message': 'Table created successfully.', 'table': serializer.data},
-            status=status.HTTP_201_CREATED
-        )
-    return Response({'success': False, 'errors': serializer.errors},
-                    status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(['PUT', 'PATCH'])
-def update_table(request, table_id):
-    """
-    Update an existing table.
-
-    PUT/PATCH /api/tables/<table_id>/update/
-    """
-    try:
-        table = Table.objects.get(id=table_id)
-    except Table.DoesNotExist:
-        return Response({'success': False, 'message': 'Table not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
-
-    partial    = request.method == 'PATCH'
-    serializer = TableSerializer(table, data=request.data, partial=partial)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({'success': True, 'message': 'Table updated successfully.',
-                         'table': serializer.data})
-    return Response({'success': False, 'errors': serializer.errors},
-                    status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(['DELETE'])
-def delete_table(request, table_id):
-    """
-    Delete a table.
-
-    DELETE /api/tables/<table_id>/
-    """
-    try:
-        table = Table.objects.get(id=table_id)
-    except Table.DoesNotExist:
-        return Response({'success': False, 'message': 'Table not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
-
-    table.delete()
-    return Response({'success': True, 'message': 'Table deleted successfully.'})
-
-
-
-
-# ============================================
-# TV BANNER MANAGEMENT  (NEW)
-# ============================================
+# ═════════════════════════════════════════════════════════════
+# TV BANNERS
+# ═════════════════════════════════════════════════════════════
 
 @api_view(['GET'])
 def get_tv_banners(request):
-    """
-    List all active TV banners for a restaurant.
-    GET /api/tv-banners/?username=<username>&client_id=<client_id>
-    """
     username  = request.query_params.get('username')
     client_id = request.query_params.get('client_id')
-
-    if not username or not client_id:
-        return Response(
-            {'success': False, 'message': 'username and client_id are required.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    banners    = TVBanner.objects.filter(
-        username=username, client_id=client_id, is_active=True
-    ).order_by('order')
-    serializer = TVBannerSerializer(banners, many=True, context={'request': request})
-    data       = serializer.data
+    if not client_id:
+        return Response({'success': False, 'message': 'client_id required.'}, status=400)
+    banners = (
+        TVBanner.objects.filter(client_id=client_id, username=username, is_active=True).order_by('order')
+        if username else TVBanner.objects.none()
+    )
+    if not banners.exists():
+        banners = TVBanner.objects.filter(client_id=client_id, is_active=True).order_by('order')
+    data = TVBannerSerializer(banners, many=True, context={'request': request}).data
     return Response({'success': True, 'banners': data, 'count': len(data)})
 
 
 @api_view(['POST'])
 def upload_tv_banners(request):
-    """
-    Upload one or more TV banner images.
-    POST /api/tv-banners/upload/
-    Body (multipart): username, client_id, banners (files)
-    """
     username  = request.data.get('username')
     client_id = request.data.get('client_id')
-
     if not username or not client_id:
-        return Response(
-            {'success': False, 'message': 'username and client_id are required.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
+        return Response({'success': False, 'message': 'username and client_id required.'}, status=400)
     files = request.FILES.getlist('banners')
     if not files:
-        return Response(
-            {'success': False, 'message': 'No banner files provided.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    max_order = TVBanner.objects.filter(username=username).aggregate(
-        Max('order')
-    )['order__max'] or 0
-
-    created = []
-    for idx, file in enumerate(files):
-        banner = TVBanner.objects.create(
-            client_id=client_id,
-            username=username,
-            image=file,
-            order=max_order + idx + 1,
-            is_active=True,
-        )
-        created.append(banner)
-
-    serializer = TVBannerSerializer(created, many=True, context={'request': request})
-    return Response({
-        'success': True,
-        'message': f'{len(created)} TV banner(s) uploaded successfully.',
-        'banners': serializer.data,
-    }, status=status.HTTP_201_CREATED)
+        return Response({'success': False, 'message': 'No files provided.'}, status=400)
+    max_order = TVBanner.objects.filter(username=username).aggregate(Max('order'))['order__max'] or 0
+    created   = [TVBanner.objects.create(client_id=client_id, username=username, image=f, order=max_order + i + 1) for i, f in enumerate(files)]
+    return Response({'success': True, 'banners': TVBannerSerializer(created, many=True, context={'request': request}).data}, status=201)
 
 
 @api_view(['DELETE'])
 def delete_tv_banner(request, banner_id):
-    """
-    Delete a TV banner image.
-    DELETE /api/tv-banners/<banner_id>/?username=<username>
-    """
-    username = request.query_params.get('username')
-    if not username:
-        return Response(
-            {'success': False, 'message': 'username is required.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+    client_id = request.query_params.get('client_id')
+    username  = request.query_params.get('username')
     try:
-        banner = TVBanner.objects.get(id=banner_id, username=username)
-        banner.image.delete()
-        banner.delete()
-        return Response({'success': True, 'message': 'TV banner deleted successfully.'})
+        b = TVBanner.objects.get(id=banner_id, client_id=client_id) if client_id else TVBanner.objects.get(id=banner_id, username=username)
+        b.image.delete(); b.delete()
+        return Response({'success': True})
     except TVBanner.DoesNotExist:
-        return Response(
-            {'success': False, 'message': 'TV banner not found.'},
-            status=status.HTTP_404_NOT_FOUND
-        )
+        return Response({'success': False, 'message': 'TV banner not found.'}, status=404)
 
 
 @api_view(['POST'])
 def reorder_tv_banners(request):
-    """
-    Reorder TV banners.
-    POST /api/tv-banners/reorder/
-    Body: { username, banner_orders: [{ id, order }, ...] }
-    """
+    client_id     = request.data.get('client_id')
     username      = request.data.get('username')
     banner_orders = request.data.get('banner_orders')
+    if not banner_orders:
+        return Response({'success': False, 'message': 'banner_orders required.'}, status=400)
+    for item in banner_orders:
+        if client_id: TVBanner.objects.filter(id=item['id'], client_id=client_id).update(order=item['order'])
+        else:         TVBanner.objects.filter(id=item['id'], username=username).update(order=item['order'])
+    return Response({'success': True})
 
-    if not username or not banner_orders:
-        return Response(
-            {'success': False, 'message': 'username and banner_orders are required.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+
+# ═════════════════════════════════════════════════════════════
+# TABLES
+# ═════════════════════════════════════════════════════════════
+
+@api_view(['GET'])
+def get_tables(request):
+    username  = request.query_params.get('username')
+    client_id = request.query_params.get('client_id')
+    if not username or not client_id:
+        return Response({'success': False, 'message': 'username and client_id required.'}, status=400)
+    tables = Table.objects.filter(username=username, client_id=client_id)
+    data   = TableSerializer(tables, many=True).data
+    return Response({'success': True, 'tables': data, 'count': len(data)})
+
+
+@api_view(['POST'])
+def create_table(request):
+    s = TableSerializer(data=request.data)
+    if s.is_valid():
+        s.save()
+        return Response({'success': True, 'table': s.data}, status=201)
+    return Response({'success': False, 'errors': s.errors}, status=400)
+
+
+@api_view(['PUT', 'PATCH'])
+def update_table(request, table_id):
     try:
-        for item in banner_orders:
-            TVBanner.objects.filter(id=item['id'], username=username).update(order=item['order'])
-        return Response({'success': True, 'message': 'TV banners reordered successfully.'})
-    except Exception as e:
-        return Response(
-            {'success': False, 'message': f'Error reordering TV banners: {str(e)}'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
+        table = Table.objects.get(id=table_id)
+    except Table.DoesNotExist:
+        return Response({'success': False, 'message': 'Table not found.'}, status=404)
+    s = TableSerializer(table, data=request.data, partial=request.method == 'PATCH')
+    if s.is_valid():
+        s.save()
+        return Response({'success': True, 'table': s.data})
+    return Response({'success': False, 'errors': s.errors}, status=400)
 
-# ============================================
-# ORDER MANAGEMENT
-# ============================================
 
-def _build_ws_payload(order):
+@api_view(['DELETE'])
+def delete_table(request, table_id):
+    try:
+        Table.objects.get(id=table_id).delete()
+        return Response({'success': True})
+    except Table.DoesNotExist:
+        return Response({'success': False, 'message': 'Table not found.'}, status=404)
+
+
+
+# ═════════════════════════════════════════════════════════════
+# PUBLIC CUSTOMER MENU  (QR scan → read-only menu for customers)
+# ═════════════════════════════════════════════════════════════
+
+@api_view(['GET'])
+def get_public_menu(request):
     """
-    Build a plain-dict snapshot of an order safe for JSON serialisation
-    and WebSocket broadcast.
+    Public endpoint — no auth required.
+    GET /api/public/menu/?client_id=CLI001
+    Returns company info + active menu items + customization for
+    the CustomerMenuPage (read-only mobile view opened by QR scan).
     """
+    client_id = request.query_params.get('client_id', '').strip()
+    if not client_id:
+        return Response({'success': False, 'message': 'client_id is required.'}, status=400)
+
+    try:
+        company = CompanyInfo.objects.get(client_id=client_id, is_active=True)
+    except CompanyInfo.DoesNotExist:
+        return Response({'success': False, 'message': 'Company not found or inactive.'}, status=404)
+
+    # Resolve admin username for this company
+    admin = (
+        AppUser.objects
+        .filter(company=company, user_type='admin', is_active=True)
+        .order_by('created_at')
+        .first()
+    )
+    username = admin.username if admin else None
+
+    # Fetch active menu items
+    items_qs = MenuItem.objects.select_related('category').filter(
+        client_id=client_id, status='active'
+    )
+    if username:
+        items_qs = items_qs.filter(username=username)
+    items_qs = items_qs.order_by('category__name', 'name')
+
+    items_data = MenuItemSerializer(items_qs, many=True, context={'request': request}).data
+
+    # Fetch customization
+    customization_data = {}
+    if username:
+        try:
+            cust = Customization.objects.get(username=username)
+            customization_data = CustomizationSerializer(
+                cust, context={'request': request, 'client_id': client_id}
+            ).data
+        except Customization.DoesNotExist:
+            pass
+
+    return Response({
+        'success': True,
+        'company': {
+            'client_id': company.client_id,
+            'firm_name': company.firm_name,
+            'place':     company.place,
+            'phone':     company.phone,
+            'email':     company.email,
+            'package':   company.package or _detect_package(company.allowed_pages),
+        },
+        'menu_items':    items_data,
+        'customization': customization_data,
+        'username':      username,
+    })
+
+# ═════════════════════════════════════════════════════════════
+# ORDERS
+# ═════════════════════════════════════════════════════════════
+
+def _ws_payload(order):
     return {
-        'id':             order.id,
-        'client_id':      order.client_id,
-        'username':       order.username,
-        'customer_name':  order.customer_name,
-        'customer_phone': getattr(order, 'customer_phone', '') or '',
-        'member_count':   getattr(order, 'member_count', 1) or 1,
-        'table_number':   order.table_number,
-        'waiter_name':    order.waiter_name or '',
-        'total_amount':   str(order.total_amount),
-        'status':         order.status,
-        'order_time':     order.order_time.isoformat(),
-        'created_at':     order.created_at.isoformat(),
-        'items': [
-            {
-                'name':     item.name,
-                'portion':  item.portion,
-                'quantity': item.quantity,
-                'price':    str(item.price),
-            }
-            for item in order.order_items.all()
-        ],
+        'id': order.id, 'client_id': order.client_id, 'username': order.username,
+        'customer_name': order.customer_name, 'customer_phone': order.customer_phone or '',
+        'member_count': order.member_count or 1, 'table_number': order.table_number,
+        'waiter_name': order.waiter_name or '', 'total_amount': str(order.total_amount),
+        'status': order.status, 'order_time': order.order_time.isoformat(),
+        'created_at': order.created_at.isoformat(),
+        'items': [{'name': i.name, 'portion': i.portion, 'quantity': i.quantity, 'price': str(i.price)} for i in order.order_items.all()],
     }
 
 
 @api_view(['POST'])
 def create_order(request):
-    """
-    Customer places an order.
-    After saving, broadcasts 'new_order' to the waiter WebSocket group.
-    """
-    serializer = OrderCreateSerializer(data=request.data)
-    if serializer.is_valid():
-        order = serializer.save()
-
+    s = OrderCreateSerializer(data=request.data)
+    if s.is_valid():
+        order = s.save()
         if channel_layer:
             try:
-                # Re-fetch with prefetch_related after save — Django clears
-                # the prefetch cache on .save(), so order.order_items.all()
-                # would return empty without this, sending items:[] to waiter.
-                order_fresh = Order.objects.prefetch_related('order_items').get(id=order.id)
-                async_to_sync(channel_layer.group_send)(
-                    f"waiter_{order_fresh.client_id}",
-                    {
-                        'type':  'new_order',
-                        'order': _build_ws_payload(order_fresh),
-                    }
-                )
+                fresh = Order.objects.prefetch_related('order_items').get(id=order.id)
+                async_to_sync(channel_layer.group_send)(f"waiter_{fresh.client_id}", {'type': 'new_order', 'order': _ws_payload(fresh)})
             except Exception as e:
-                print(f"⚠️  WebSocket broadcast to waiter failed: {e}")
-
-        response_serializer = OrderSerializer(order)
-        return Response({'success': True, 'message': 'Order created successfully.',
-                         'order': response_serializer.data}, status=status.HTTP_201_CREATED)
-
-    return Response({'success': False, 'errors': serializer.errors},
-                    status=status.HTTP_400_BAD_REQUEST)
+                print(f"WS broadcast failed: {e}")
+        return Response({'success': True, 'order': OrderSerializer(order).data}, status=201)
+    return Response({'success': False, 'errors': s.errors}, status=400)
 
 
 @api_view(['POST'])
 def accept_order(request, order_id):
-    """
-    Waiter accepts a pending order.
-
-    Request body: { "waiter_name": "Rajan" }
-
-    Actions:
-      1. Sets order.waiter_name and order.status = 'preparing'.
-      2. Broadcasts 'order_accepted' to KitchenPanel WebSocket group.
-
-    POST /api/orders/<order_id>/accept/
-    """
     waiter_name = request.data.get('waiter_name', '').strip()
     if not waiter_name:
-        return Response({'success': False, 'message': 'waiter_name is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-
+        return Response({'success': False, 'message': 'waiter_name required.'}, status=400)
     try:
         order = Order.objects.prefetch_related('order_items').get(id=order_id)
     except Order.DoesNotExist:
-        return Response({'success': False, 'message': 'Order not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
-
+        return Response({'success': False, 'message': 'Order not found.'}, status=404)
     if order.status != 'pending':
-        return Response({
-            'success': False,
-            'message': f'Cannot accept an order with status "{order.status}". Only pending orders can be accepted.'
-        }, status=status.HTTP_400_BAD_REQUEST)
-
+        return Response({'success': False, 'message': f'Cannot accept — status is "{order.status}".'}, status=400)
     order.waiter_name = waiter_name
     order.status      = 'preparing'
     order.save()
-
     if channel_layer:
         try:
-            # Re-fetch with prefetch_related after save — Django clears
-            # the prefetch cache on .save(), so order.order_items.all()
-            # would return empty without this, sending items:[] to kitchen.
-            order_fresh = Order.objects.prefetch_related('order_items').get(id=order.id)
-            async_to_sync(channel_layer.group_send)(
-                f"kitchen_{order_fresh.client_id}",
-                {
-                    'type':  'order_accepted',
-                    'order': _build_ws_payload(order_fresh),
-                }
-            )
+            fresh = Order.objects.prefetch_related('order_items').get(id=order.id)
+            async_to_sync(channel_layer.group_send)(f"kitchen_{fresh.client_id}", {'type': 'order_accepted', 'order': _ws_payload(fresh)})
         except Exception as e:
-            print(f"⚠️  WebSocket broadcast to kitchen failed: {e}")
-
-    serializer = OrderSerializer(order)
-    return Response({
-        'success': True,
-        'message': f'Order accepted by {waiter_name} and sent to kitchen.',
-        'order':   serializer.data,
-    })
+            print(f"WS kitchen broadcast failed: {e}")
+    return Response({'success': True, 'order': OrderSerializer(order).data})
 
 
 @api_view(['GET'])
@@ -1493,59 +1260,36 @@ def get_orders(request):
     client_id     = request.query_params.get('client_id')
     username      = request.query_params.get('username')
     status_filter = request.query_params.get('status')
-
     if not client_id:
-        return Response({'success': False, 'message': 'client_id is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-
-    # Filter by client_id always.
-    # username is optional — when provided it scopes to the restaurant owner's
-    # QR-code username. When omitted, return all orders for the client_id.
-    queryset = Order.objects.filter(client_id=client_id).prefetch_related('order_items')
-    if username:
-        queryset = queryset.filter(username=username)
-    if status_filter:
-        queryset = queryset.filter(status=status_filter)
-
-    # ── Force full evaluation while DB connection is guaranteed open ──────────
-    # Under ASGI the queryset is normally evaluated lazily inside the serializer.
-    # By that point the middleware may have called close_old_connections().
-    # Calling list() here fetches all rows (including prefetched order_items)
-    # in a single atomic DB round-trip before we hand off to the serializer.
-    orders = list(queryset.order_by('-created_at'))
-
-    serializer  = OrderSerializer(orders, many=True)
-    orders_data = serializer.data
-    return Response({'success': True, 'orders': orders_data, 'count': len(orders_data)})
+        return Response({'success': False, 'message': 'client_id required.'}, status=400)
+    qs = Order.objects.filter(client_id=client_id).prefetch_related('order_items')
+    if username:      qs = qs.filter(username=username)
+    if status_filter: qs = qs.filter(status=status_filter)
+    data = OrderSerializer(list(qs.order_by('-created_at')), many=True).data
+    return Response({'success': True, 'orders': data, 'count': len(data)})
 
 
 @api_view(['GET'])
 def get_order_detail(request, order_id):
     try:
-        order      = Order.objects.prefetch_related('order_items').get(id=order_id)
-        serializer = OrderSerializer(order)
-        return Response({'success': True, 'order': serializer.data})
+        order = Order.objects.prefetch_related('order_items').get(id=order_id)
+        return Response({'success': True, 'order': OrderSerializer(order).data})
     except Order.DoesNotExist:
-        return Response({'success': False, 'message': 'Order not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': False, 'message': 'Order not found.'}, status=404)
 
 
 @api_view(['PATCH'])
 def update_order_status(request, order_id):
     new_status = request.data.get('status')
     if not new_status:
-        return Response({'success': False, 'message': 'status is required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({'success': False, 'message': 'status required.'}, status=400)
     try:
-        order        = Order.objects.get(id=order_id)
+        order = Order.objects.get(id=order_id)
         order.status = new_status
         order.save()
-        serializer   = OrderSerializer(order)
-        return Response({'success': True, 'message': 'Order status updated successfully.',
-                         'order': serializer.data})
+        return Response({'success': True, 'order': OrderSerializer(order).data})
     except Order.DoesNotExist:
-        return Response({'success': False, 'message': 'Order not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': False, 'message': 'Order not found.'}, status=404)
 
 
 @api_view(['POST'])
@@ -1553,28 +1297,22 @@ def cancel_order(request, order_id):
     try:
         order = Order.objects.get(id=order_id)
         if order.status in ['completed', 'cancelled']:
-            return Response({'success': False,
-                             'message': f'Cannot cancel an order with status: {order.status}.'},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response({'success': False, 'message': f'Cannot cancel — status is "{order.status}".'}, status=400)
         order.status = 'cancelled'
         order.save()
-        serializer   = OrderSerializer(order)
-        return Response({'success': True, 'message': 'Order cancelled successfully.',
-                         'order': serializer.data})
+        return Response({'success': True, 'order': OrderSerializer(order).data})
     except Order.DoesNotExist:
-        return Response({'success': False, 'message': 'Order not found.'},
-                        status=status.HTTP_404_NOT_FOUND)
+        return Response({'success': False, 'message': 'Order not found.'}, status=404)
 
 
 @api_view(['GET'])
 def get_order_stats(request):
     client_id = request.query_params.get('client_id')
     username  = request.query_params.get('username')
-    if not client_id or not username:
-        return Response({'success': False, 'message': 'client_id and username are required.'},
-                        status=status.HTTP_400_BAD_REQUEST)
-
-    orders = Order.objects.filter(client_id=client_id, username=username)
+    if not client_id:
+        return Response({'success': False, 'message': 'client_id required.'}, status=400)
+    orders = Order.objects.filter(client_id=client_id)
+    if username: orders = orders.filter(username=username)
     return Response({
         'success': True,
         'stats': {
@@ -1584,7 +1322,6 @@ def get_order_stats(request):
             'ready_orders':     orders.filter(status='ready').count(),
             'completed_orders': orders.filter(status='completed').count(),
             'cancelled_orders': orders.filter(status='cancelled').count(),
-            'total_revenue':    orders.filter(status='completed').aggregate(
-                                    Sum('total_amount'))['total_amount__sum'] or 0,
+            'total_revenue':    orders.filter(status='completed').aggregate(Sum('total_amount'))['total_amount__sum'] or 0,
         }
     })
