@@ -3,6 +3,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     MenuItemViewSet, CategoryViewSet, TaxViewSet,
+    MealTypeViewSet,  # ← ADDED
 
     # Auth
     user_login, staff_login, verify_secret_code,
@@ -37,6 +38,9 @@ from .views import (
     # Tables
     get_tables, create_table, update_table, delete_table,
 
+    # Kitchens  ← NEW
+    get_kitchens, create_kitchen, update_kitchen, delete_kitchen,
+
     # Orders
     create_order, get_orders, get_order_detail,
     update_order_status, cancel_order, get_order_stats, accept_order,
@@ -47,6 +51,7 @@ router = DefaultRouter()
 router.register(r'categories', CategoryViewSet, basename='category')
 router.register(r'taxes',      TaxViewSet,      basename='tax')
 router.register(r'menu-items', MenuItemViewSet, basename='menuitem')
+router.register(r'meal-types', MealTypeViewSet, basename='mealtype')  # ← ADDED
 
 urlpatterns = [
     path('', include(router.urls)),
@@ -108,9 +113,15 @@ urlpatterns = [
     path('tables/<int:table_id>/',        delete_table, name='delete-table'),
     path('tables/<int:table_id>/update/', update_table, name='update-table'),
 
+    # ── Kitchens ─────────────────────────────────────────────  ← NEW
+    path('kitchens/',                           get_kitchens,   name='get-kitchens'),
+    path('kitchens/create/',                    create_kitchen, name='create-kitchen'),
+    path('kitchens/<int:kitchen_id>/',          delete_kitchen, name='delete-kitchen'),
+    path('kitchens/<int:kitchen_id>/update/',   update_kitchen, name='update-kitchen'),
+
     # ── Orders ───────────────────────────────────────────────
     path('orders/',                       create_order,        name='create-order'),
-    path('orders/create/',                create_order,        name='create-order-alt'),  # mobile menu uses this
+    path('orders/create/',                create_order,        name='create-order-alt'),
     path('orders/list/',                  get_orders,          name='get-orders'),
     path('orders/stats/',                 get_order_stats,     name='get-order-stats'),
     path('orders/<int:order_id>/',        get_order_detail,    name='get-order-detail'),

@@ -1,4 +1,4 @@
-"""
+r"""
 Django settings for backend project with PostgreSQL + Cloudflare R2.
 
 Project structure:
@@ -32,12 +32,13 @@ DEBUG = True
 ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
-    '192.168.1.23',
-    '192.168.1.57',
-    '192.168.1.144',
     'livemenu.imcbs.com',
     'www.livemenu.imcbs.com',
 ]
+
+# Allow all 192.168.1.x IPs in development (any device on the local network)
+if DEBUG:
+    ALLOWED_HOSTS += [f'192.168.1.{i}' for i in range(1, 256)]
 
 # ============================================
 # INSTALLED APPS

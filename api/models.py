@@ -3,6 +3,9 @@
 # Super Admin  → company FK is NULL (not tied to one company)
 # Company Admin → company FK = their company
 # Staff         → company FK = their company
+# UPDATED: Added meal_type field to MenuItem (breakfast / lunch / dinner / all)
+# UPDATED: Added MealType model for dynamic meal type management
+# UPDATED: Added Kitchen model for Kitchen Master
 
 from django.db import models
 from django.db.models import Sum
@@ -98,6 +101,59 @@ class Tax(models.Model):
         return f"{self.name} - {self.percentage}%"
 
 
+# ─────────────────────────────────────────────────────────────
+# MEAL TYPE MODEL  ← NEW
+# Stores dynamic meal types created by the restaurant admin.
+# e.g. Breakfast (07:00–11:00), Lunch (11:00–15:00), Dinner (15:00–23:30)
+# MenuItem.meal_type stores the ID of one of these rows (as a string).
+# ─────────────────────────────────────────────────────────────
+class MealType(models.Model):
+    name       = models.CharField(max_length=100)
+    start_time = models.TimeField(help_text='Meal period start time, e.g. 07:00')
+    end_time   = models.TimeField(help_text='Meal period end time, e.g. 11:00')
+    client_id  = models.CharField(max_length=100, db_index=True)
+    username   = models.CharField(max_length=100, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table        = 'meal_types'
+        ordering        = ['start_time', 'name']
+        unique_together = ['client_id', 'name']
+        indexes         = [models.Index(fields=['client_id', 'username'])]
+        verbose_name        = 'Meal Type'
+        verbose_name_plural = 'Meal Types'
+
+    def __str__(self):
+        return f"{self.name} ({self.start_time}–{self.end_time}) [{self.client_id}]"
+
+
+# ─────────────────────────────────────────────────────────────
+# KITCHEN MODEL
+# Stores kitchens created by the restaurant admin.
+# e.g. Kitchen 1 (Main Kitchen), Kitchen 2 (Grill Station), etc.
+# ─────────────────────────────────────────────────────────────
+class Kitchen(models.Model):
+    kitchen_number = models.CharField(max_length=50)
+    kitchen_name   = models.CharField(max_length=200, blank=True, null=True)
+    client_id      = models.CharField(max_length=100, db_index=True)
+    username       = models.CharField(max_length=100, db_index=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table        = 'kitchens'
+        ordering        = ['kitchen_number']
+        unique_together = ['username', 'kitchen_number']
+        indexes         = [models.Index(fields=['client_id', 'username'])]
+        verbose_name        = 'Kitchen'
+        verbose_name_plural = 'Kitchens'
+
+    def __str__(self):
+        name = self.kitchen_name or ''
+        return f"Kitchen {self.kitchen_number} — {name} ({self.username})"
+
+
 class MenuItem(models.Model):
     STATUS_CHOICES     = [('active', 'Active'), ('inactive', 'Inactive')]
     PRICE_TYPE_CHOICES = [
@@ -105,12 +161,35 @@ class MenuItem(models.Model):
         ('combo',   'Combo Price'),
         ('single',  'Single Price'),
     ]
+    FOOD_TYPE_CHOICES = [
+        ('veg',     'Vegetarian'),
+        ('non_veg', 'Non-Vegetarian'),
+    ]
 
     session_code = models.CharField(max_length=50)
     name         = models.CharField(max_length=200)
     category     = models.ForeignKey(Category, on_delete=models.PROTECT, related_name='items')
     status       = models.CharField(max_length=10, choices=STATUS_CHOICES, default='active')
+    food_type    = models.CharField(
+        max_length=10, choices=FOOD_TYPE_CHOICES, default='non_veg',
+        help_text='Veg / Non-Veg indicator for the menu item.'
+    )
     price_type   = models.CharField(max_length=10, choices=PRICE_TYPE_CHOICES, default='single')
+
+    # Kitchen that prepares this item (nullable = unassigned)
+    kitchen      = models.ForeignKey(
+        'Kitchen', on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='menu_items',
+        help_text='Kitchen that prepares this item.'
+    )
+
+    # Stores list of MealType IDs. Empty list = All Day / unassigned.
+    # JSONField used to support multiple meal types per item.
+    meal_type    = models.JSONField(
+        blank=True, default=list,
+        help_text='List of MealType IDs. Empty list = shown all day.'
+    )
+
     price1       = models.DecimalField(max_digits=10, decimal_places=2)
     price2       = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     price3       = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
@@ -161,35 +240,19 @@ class AppUser(models.Model):
         ('user',       'Staff'),
     ]
 
-    ROLE_CHOICES = [
-        ('waiter',  'Waiter'),
-        ('kitchen', 'Kitchen'),
-        ('both',    'Both'),
-    ]
-
-    # NULL for superadmin — they are not tied to one company
-    company = models.ForeignKey(
-        CompanyInfo,
-        on_delete=models.CASCADE,
-        related_name='users',
-        to_field='client_id',
-        db_column='client_id',
-        blank=True,
-        null=True,
+    company   = models.ForeignKey(
+        CompanyInfo, on_delete=models.CASCADE,
+        null=True, blank=True, related_name='users',
+        help_text='NULL only for superadmin accounts.'
     )
-
     username  = models.CharField(max_length=100, unique=True)
     password  = models.CharField(max_length=255)
     full_name = models.CharField(max_length=200, blank=True, null=True)
     user_type = models.CharField(max_length=20, choices=USER_TYPE_CHOICES, default='user')
     role      = models.CharField(
-        max_length=10, choices=ROLE_CHOICES,
-        blank=True, null=True, default=None,
-        help_text="Only for staff (user_type='user')"
+        max_length=20, blank=True, null=True,
+        help_text="Staff role: 'waiter', 'kitchen', or 'both'."
     )
-
-    # Per-staff page access set by Company Admin
-    # NULL = not configured yet, [] = no pages, [...] = specific pages
     allowed_pages = models.JSONField(
         blank=True, null=True, default=None,
         help_text="Pages this staff user can access. NULL = not set."
