@@ -4,12 +4,13 @@
 # UPDATED: Added customer_phone and member_count to OrderCreateSerializer
 # UPDATED: Added TVBannerSerializer for TV Menu Display banners
 # UPDATED: Added meal_type to MenuItemSerializer
-# UPDATED: Added MealTypeSerializer ← NEW
+# UPDATED: Added MealTypeSerializer
+# UPDATED: Added tv_theme to CustomizationSerializer
 
 from rest_framework import serializers
 from .models import MenuItem, Category, Tax, AppUser, CompanyInfo
 from .models import Customization, Banner, TVBanner, Table, Order, OrderItem
-from .models import MealType, Kitchen  # ← Kitchen ADDED
+from .models import MealType, Kitchen, SessionalPrice
 
 
 def _build_url(request, url):
@@ -56,7 +57,7 @@ class TaxSerializer(serializers.ModelSerializer):
 
 
 # ============================================
-# MEAL TYPE SERIALIZER  ← NEW
+# MEAL TYPE SERIALIZER
 # ============================================
 
 class MealTypeSerializer(serializers.ModelSerializer):
@@ -77,25 +78,37 @@ class MealTypeSerializer(serializers.ModelSerializer):
         return data
 
 
+class SessionalPriceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = SessionalPrice
+        fields = ['id', 'session_name', 'price1', 'price2', 'price3', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
 class MenuItemSerializer(serializers.ModelSerializer):
-    category_name = serializers.CharField(source='category.name', read_only=True)
-    kitchen_name  = serializers.SerializerMethodField()
-    image_url     = serializers.SerializerMethodField()
-    meal_types    = serializers.SerializerMethodField()
+    category_name   = serializers.CharField(source='category.name', read_only=True)
+    kitchen_name    = serializers.SerializerMethodField()
+    image_url       = serializers.SerializerMethodField()
+    meal_types      = serializers.SerializerMethodField()
+    sessional_prices = SessionalPriceSerializer(many=True, read_only=True)
 
     class Meta:
         model = MenuItem
         fields = [
             'id', 'session_code', 'name', 'category', 'category_name',
             'kitchen', 'kitchen_name',
-            'status', 'food_type', 'price_type',
+            'status', 'food_type', 'price_type', 'price_category',
             'meal_type',
             'meal_types',
             'remark', 'price1', 'price2', 'price3',
             'tax', 'hsn_code', 'image', 'image_url',
+            'sessional_prices',
             'username', 'client_id', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'category_name', 'image_url', 'meal_types', 'kitchen_name']
+        read_only_fields = [
+            'id', 'created_at', 'updated_at', 'category_name',
+            'image_url', 'meal_types', 'kitchen_name', 'sessional_prices',
+        ]
 
     def get_image_url(self, obj):
         if obj.image:
@@ -189,22 +202,31 @@ class BannerSerializer(serializers.ModelSerializer):
 # ============================================
 
 class TVBannerSerializer(serializers.ModelSerializer):
-    image_url = serializers.SerializerMethodField()
+    image_url  = serializers.SerializerMethodField()
+    media_type = serializers.SerializerMethodField()
 
     class Meta:
         model  = TVBanner
         fields = [
             'id', 'client_id', 'username',
-            'image', 'image_url',
+            'image', 'image_url', 'media_type',
             'order', 'is_active',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'image_url', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'image_url', 'media_type', 'created_at', 'updated_at']
 
     def get_image_url(self, obj):
         if obj.image and hasattr(obj.image, 'url'):
             return _build_url(self.context.get('request'), obj.image.url)
         return None
+
+    def get_media_type(self, obj):
+        """Return 'video' for mp4/webm/ogg/mov files, 'image' for everything else."""
+        if obj.image and obj.image.name:
+            ext = obj.image.name.rsplit('.', 1)[-1].lower()
+            if ext in ('mp4', 'webm', 'ogg', 'mov'):
+                return 'video'
+        return 'image'
 
 
 # ============================================
@@ -235,7 +257,7 @@ class TableSerializer(serializers.ModelSerializer):
 
 
 # ============================================
-# KITCHEN SERIALIZER  ← NEW
+# KITCHEN SERIALIZER
 # ============================================
 
 class KitchenSerializer(serializers.ModelSerializer):
@@ -269,10 +291,16 @@ class KitchenSerializer(serializers.ModelSerializer):
 # ============================================
 
 class CustomizationSerializer(serializers.ModelSerializer):
-    logo_url    = serializers.SerializerMethodField()
-    banner_url  = serializers.SerializerMethodField()
-    tv_logo_url = serializers.SerializerMethodField()
-    banners     = serializers.SerializerMethodField()
+    logo_url         = serializers.SerializerMethodField()
+    banner_url       = serializers.SerializerMethodField()
+    tv_logo_url      = serializers.SerializerMethodField()
+    banners          = serializers.SerializerMethodField()
+    # Theme 2 background image URLs
+    tv_theme2_left_url  = serializers.SerializerMethodField()
+    tv_theme2_right_url = serializers.SerializerMethodField()
+    # Theme 3 media URLs
+    tv_theme3_image_url = serializers.SerializerMethodField()
+    tv_theme3_video_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Customization
@@ -282,12 +310,26 @@ class CustomizationSerializer(serializers.ModelSerializer):
             'header_bg_color', 'header_text_color', 'primary_color',
             'qr_foreground_color', 'qr_background_color', 'qr_size', 'qr_margin',
             'tv_bg_color', 'tv_text_color', 'tv_accent_color', 'tv_card_bg_color',
+            # ── TV layout theme selector ─────────────────────────────────────────
+            'tv_theme',
+            # ─────────────────────────────────────────────────────────────────────
             'logo_shape',
             'logo', 'banner', 'tv_logo',
             'logo_url', 'banner_url', 'tv_logo_url', 'banners',
+            # Theme 2 fields
+            'tv_theme2_left', 'tv_theme2_right',
+            'tv_theme2_left_url', 'tv_theme2_right_url',
+            # Theme 3 fields
+            'tv_theme3_image', 'tv_theme3_video',
+            'tv_theme3_image_url', 'tv_theme3_video_url',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['logo_url', 'banner_url', 'tv_logo_url', 'banners', 'created_at', 'updated_at']
+        read_only_fields = [
+            'logo_url', 'banner_url', 'tv_logo_url', 'banners',
+            'tv_theme2_left_url', 'tv_theme2_right_url',
+            'tv_theme3_image_url', 'tv_theme3_video_url',
+            'created_at', 'updated_at',
+        ]
 
     def get_logo_url(self, obj):
         if obj.logo:
@@ -302,6 +344,26 @@ class CustomizationSerializer(serializers.ModelSerializer):
     def get_tv_logo_url(self, obj):
         if obj.tv_logo:
             return _build_url(self.context.get('request'), obj.tv_logo.url)
+        return None
+
+    def get_tv_theme2_left_url(self, obj):
+        if obj.tv_theme2_left:
+            return _build_url(self.context.get('request'), obj.tv_theme2_left.url)
+        return None
+
+    def get_tv_theme2_right_url(self, obj):
+        if obj.tv_theme2_right:
+            return _build_url(self.context.get('request'), obj.tv_theme2_right.url)
+        return None
+
+    def get_tv_theme3_image_url(self, obj):
+        if obj.tv_theme3_image:
+            return _build_url(self.context.get('request'), obj.tv_theme3_image.url)
+        return None
+
+    def get_tv_theme3_video_url(self, obj):
+        if obj.tv_theme3_video:
+            return _build_url(self.context.get('request'), obj.tv_theme3_video.url)
         return None
 
     def get_banners(self, obj):
@@ -328,7 +390,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
     item_total          = serializers.ReadOnlyField()
     tax_amount          = serializers.ReadOnlyField()
     item_total_with_tax = serializers.ReadOnlyField()
-    kitchen_number      = serializers.SerializerMethodField()  # NEW
+    kitchen_number      = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderItem

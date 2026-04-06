@@ -20,14 +20,15 @@ from channels.layers import get_channel_layer
 from .models import (
     MenuItem, Category, Tax, AppUser, CompanyInfo,
     Customization, Banner, TVBanner, Table, Order, OrderItem,
-    MealType, Kitchen,  # ← Kitchen ADDED
+    MealType, Kitchen, SessionalPrice,  # ← SessionalPrice ADDED
 )
 from .serializers import (
     MenuItemSerializer, CategorySerializer, TaxSerializer,
     AppUserSerializer, CompanyInfoSerializer,
     CustomizationSerializer, BannerSerializer, TVBannerSerializer,
     TableSerializer, OrderSerializer, OrderCreateSerializer,
-    MealTypeSerializer, KitchenSerializer,  # ← KitchenSerializer ADDED
+    MealTypeSerializer, KitchenSerializer,   # ← KitchenSerializer ADDED
+    SessionalPriceSerializer,                # ← SessionalPriceSerializer ADDED
 )
 import requests
 
@@ -142,7 +143,7 @@ class MenuItemViewSet(viewsets.ModelViewSet):
         status_filter = self.request.query_params.get('status')
         category      = self.request.query_params.get('category')
 
-        qs = MenuItem.objects.select_related('category').all()
+        qs = MenuItem.objects.select_related('category').prefetch_related('sessional_prices').all()
         if client_id and username:
             qs = qs.filter(client_id=client_id, username=username)
         elif client_id:
@@ -153,6 +154,59 @@ class MenuItemViewSet(viewsets.ModelViewSet):
         if status_filter: qs = qs.filter(status=status_filter)
         if category:      qs = qs.filter(category__name=category)
         return qs.order_by('category', 'name')
+
+    # ── helpers ──────────────────────────────────────────────
+    def _sync_sessional_prices(self, menu_item, sessional_prices_data):
+        """
+        Replace all sessional prices for *menu_item* with the supplied list.
+        Each entry must have at minimum: { session_name, price1 }.
+        price2 / price3 are optional.
+        Passing an empty list clears all rows.
+        """
+        menu_item.sessional_prices.all().delete()
+        for entry in sessional_prices_data:
+            SessionalPrice.objects.create(
+                menu_item    = menu_item,
+                session_name = entry['session_name'],
+                price1       = entry['price1'],
+                price2       = entry.get('price2'),
+                price3       = entry.get('price3'),
+            )
+
+    # ── create ───────────────────────────────────────────────
+    def create(self, request, *args, **kwargs):
+        sessional_prices_data = request.data.pop('sessional_prices', None)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        menu_item = serializer.save()
+
+        if sessional_prices_data is not None:
+            self._sync_sessional_prices(menu_item, sessional_prices_data)
+
+        # Re-fetch so response includes freshly written sessional_prices
+        menu_item.refresh_from_db()
+        return Response(
+            self.get_serializer(menu_item).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    # ── update (PUT / PATCH) ──────────────────────────────────
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+
+        # Pop sessional_prices before passing to serializer
+        sessional_prices_data = request.data.pop('sessional_prices', None)
+
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        menu_item = serializer.save()
+
+        if sessional_prices_data is not None:
+            self._sync_sessional_prices(menu_item, sessional_prices_data)
+
+        menu_item.refresh_from_db()
+        return Response(self.get_serializer(menu_item).data)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -917,13 +971,67 @@ def license_lookup(request):
         r = requests.get(endpoint, timeout=8)
         if not r.ok:
             return Response({'success': False, 'message': f'Licensing server error {r.status_code}.'}, status=502)
-        data       = r.json()
-        client_ids = data if isinstance(data, list) else data.get('client_ids', [])
-        found      = any(
-            (entry if isinstance(entry, str) else entry.get('client_id', '')).upper() == client_id
-            for entry in client_ids
-        )
-        return Response({'success': True, 'valid': found, 'client_id': client_id})
+
+        data = r.json()
+
+        # Unwrap: response may be a list directly, or { status, count, data: [...] }
+        if isinstance(data, list):
+            candidates = data
+        elif isinstance(data, dict):
+            candidates = data.get('data') or data.get('client_ids') or []
+            if not isinstance(candidates, list):
+                candidates = [candidates] if candidates else []
+        else:
+            candidates = []
+
+        # Field names seen in the wild
+        id_keys    = ['client_id', 'clientId', 'clientid', 'client', 'clientID']
+        name_keys  = ['company_name', 'firm_name', 'company', 'name', 'firm']
+        place_keys = ['place', 'city', 'location', 'address', 'district']
+
+        for entry in candidates:
+            if not isinstance(entry, dict):
+                if isinstance(entry, str) and entry.upper() == client_id:
+                    return Response({'success': True, 'valid': True, 'client_id': client_id,
+                                     'company': {'firm_name': '', 'place': ''}})
+                continue
+
+            raw_id = ''
+            for k in id_keys:
+                if k in entry:
+                    raw_id = str(entry[k]).upper()
+                    break
+
+            if raw_id != client_id:
+                continue
+
+            firm_name = ''
+            for k in name_keys:
+                if entry.get(k):
+                    firm_name = str(entry[k])
+                    break
+
+            place = ''
+            for k in place_keys:
+                if entry.get(k):
+                    place = str(entry[k])
+                    break
+
+            return Response({
+                'success':   True,
+                'valid':     True,
+                'client_id': client_id,
+                'firm_name': firm_name,
+                'place':     place,
+                'company':   {'firm_name': firm_name, 'place': place},
+            })
+
+        return Response({
+            'success': False,
+            'valid':   False,
+            'message': f'Client ID "{client_id}" not found in licensing server.',
+        }, status=404)
+
     except requests.RequestException as e:
         return Response({'success': False, 'message': f'Cannot reach licensing server: {e}'}, status=502)
     except Exception as e:
@@ -1020,6 +1128,8 @@ def save_customization(request):
         'welcome_message', 'theme_name',
         # TV theme colors
         'tv_bg_color', 'tv_text_color', 'tv_accent_color', 'tv_card_bg_color',
+        # TV layout theme
+        'tv_theme',
     ]
     for f in fields:
         val = request.data.get(f)
@@ -1029,6 +1139,14 @@ def save_customization(request):
     logo    = request.FILES.get('logo')
     banner  = request.FILES.get('banner')
     tv_logo = request.FILES.get('tv_logo')
+
+    # ── Theme 2 background images ──────────────────────────────────────────────
+    tv_theme2_left  = request.FILES.get('tv_theme2_left')
+    tv_theme2_right = request.FILES.get('tv_theme2_right')
+
+    # ── Theme 3 media ──────────────────────────────────────────────────────────
+    tv_theme3_image = request.FILES.get('tv_theme3_image')
+    tv_theme3_video = request.FILES.get('tv_theme3_video')
 
     if logo:
         if c.logo:
@@ -1045,6 +1163,26 @@ def save_customization(request):
             try: c.tv_logo.delete(save=False)
             except Exception: pass
         c.tv_logo = tv_logo
+    if tv_theme2_left:
+        if c.tv_theme2_left:
+            try: c.tv_theme2_left.delete(save=False)
+            except Exception: pass
+        c.tv_theme2_left = tv_theme2_left
+    if tv_theme2_right:
+        if c.tv_theme2_right:
+            try: c.tv_theme2_right.delete(save=False)
+            except Exception: pass
+        c.tv_theme2_right = tv_theme2_right
+    if tv_theme3_image:
+        if c.tv_theme3_image:
+            try: c.tv_theme3_image.delete(save=False)
+            except Exception: pass
+        c.tv_theme3_image = tv_theme3_image
+    if tv_theme3_video:
+        if c.tv_theme3_video:
+            try: c.tv_theme3_video.delete(save=False)
+            except Exception: pass
+        c.tv_theme3_video = tv_theme3_video
 
     c.save()
     return Response({
@@ -1156,6 +1294,18 @@ def upload_tv_banners(request):
     files = request.FILES.getlist('banners')
     if not files:
         return Response({'success': False, 'message': 'No files provided.'}, status=400)
+
+    ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp', 'image/gif'}
+    ALLOWED_VIDEO_TYPES = {'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'}
+    ALLOWED_TYPES       = ALLOWED_IMAGE_TYPES | ALLOWED_VIDEO_TYPES
+
+    for f in files:
+        if f.content_type not in ALLOWED_TYPES:
+            return Response(
+                {'success': False, 'message': f'Unsupported file type: {f.content_type}. Allowed: JPG, PNG, WEBP, MP4, WEBM.'},
+                status=400
+            )
+
     max_order = TVBanner.objects.filter(username=username).aggregate(Max('order'))['order__max'] or 0
     created   = [TVBanner.objects.create(client_id=client_id, username=username, image=f, order=max_order + i + 1) for i, f in enumerate(files)]
     return Response({'success': True, 'banners': TVBannerSerializer(created, many=True, context={'request': request}).data}, status=201)

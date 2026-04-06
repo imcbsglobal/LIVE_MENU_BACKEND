@@ -6,6 +6,9 @@
 # UPDATED: Added meal_type field to MenuItem (breakfast / lunch / dinner / all)
 # UPDATED: Added MealType model for dynamic meal type management
 # UPDATED: Added Kitchen model for Kitchen Master
+# UPDATED: Added tv_theme field to Customization for TV layout selection
+# UPDATED: Added price_category field to MenuItem (regular / sessional)
+# UPDATED: Added SessionalPrice model for sessional price rows per MenuItem
 
 from django.db import models
 from django.db.models import Sum
@@ -102,10 +105,7 @@ class Tax(models.Model):
 
 
 # ─────────────────────────────────────────────────────────────
-# MEAL TYPE MODEL  ← NEW
-# Stores dynamic meal types created by the restaurant admin.
-# e.g. Breakfast (07:00–11:00), Lunch (11:00–15:00), Dinner (15:00–23:30)
-# MenuItem.meal_type stores the ID of one of these rows (as a string).
+# MEAL TYPE MODEL
 # ─────────────────────────────────────────────────────────────
 class MealType(models.Model):
     name       = models.CharField(max_length=100)
@@ -130,8 +130,6 @@ class MealType(models.Model):
 
 # ─────────────────────────────────────────────────────────────
 # KITCHEN MODEL
-# Stores kitchens created by the restaurant admin.
-# e.g. Kitchen 1 (Main Kitchen), Kitchen 2 (Grill Station), etc.
 # ─────────────────────────────────────────────────────────────
 class Kitchen(models.Model):
     kitchen_number = models.CharField(max_length=50)
@@ -165,6 +163,10 @@ class MenuItem(models.Model):
         ('veg',     'Vegetarian'),
         ('non_veg', 'Non-Vegetarian'),
     ]
+    PRICE_CATEGORY_CHOICES = [
+        ('regular',   'Regular Price'),
+        ('sessional', 'Sessional Price'),
+    ]
 
     session_code = models.CharField(max_length=50)
     name         = models.CharField(max_length=200)
@@ -174,90 +176,98 @@ class MenuItem(models.Model):
         max_length=10, choices=FOOD_TYPE_CHOICES, default='non_veg',
         help_text='Veg / Non-Veg indicator for the menu item.'
     )
-    price_type   = models.CharField(max_length=10, choices=PRICE_TYPE_CHOICES, default='single')
+    price_type     = models.CharField(max_length=10, choices=PRICE_TYPE_CHOICES, default='single')
+    price_category = models.CharField(
+        max_length=10, choices=PRICE_CATEGORY_CHOICES, default='regular',
+        help_text='Whether this item uses a regular fixed price or sessional pricing.'
+    )
 
     # Kitchen that prepares this item (nullable = unassigned)
     kitchen      = models.ForeignKey(
-        'Kitchen', on_delete=models.SET_NULL,
-        null=True, blank=True, related_name='menu_items',
-        help_text='Kitchen that prepares this item.'
+        Kitchen, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='menu_items',
+        help_text='Kitchen assigned to prepare this item.'
     )
 
-    # Stores list of MealType IDs. Empty list = All Day / unassigned.
-    # JSONField used to support multiple meal types per item.
     meal_type    = models.JSONField(
-        blank=True, default=list,
-        help_text='List of MealType IDs. Empty list = shown all day.'
+        blank=True, null=True, default=list,
+        help_text='List of MealType IDs this item is available for. Empty = all day.'
     )
+    remark   = models.TextField(blank=True, null=True)
+    price1   = models.DecimalField(max_digits=10, decimal_places=2)
+    price2   = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    price3   = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    tax      = models.DecimalField(max_digits=5,  decimal_places=2, null=True, blank=True)
+    hsn_code = models.CharField(max_length=20, blank=True, null=True)
+    image    = models.ImageField(upload_to='menu_items/', blank=True, null=True)
+    username  = models.CharField(max_length=100)
+    client_id = models.CharField(max_length=100, default='', db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        db_table = 'menu_items'
+        ordering = ['category', 'name']
+
+    def __str__(self):
+        return f"{self.name} ({self.category})"
+
+
+# ─────────────────────────────────────────────────────────────
+# SESSIONAL PRICE MODEL
+# Each row represents one session slot for a MenuItem.
+# Only relevant when MenuItem.price_category == 'sessional'.
+# price1 is always required; price2 / price3 mirror MenuItem's
+# portion / combo semantics and are optional.
+# ─────────────────────────────────────────────────────────────
+class SessionalPrice(models.Model):
+    menu_item    = models.ForeignKey(
+        MenuItem, on_delete=models.CASCADE, related_name='sessional_prices',
+        help_text='The menu item this sessional price belongs to.'
+    )
+    session_name = models.CharField(
+        max_length=100,
+        help_text='Label for this price session, e.g. "Breakfast", "Happy Hour".'
+    )
     price1       = models.DecimalField(max_digits=10, decimal_places=2)
-    price2       = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    price3       = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    tax          = models.DecimalField(max_digits=5,  decimal_places=2, default=0.00)
-    hsn_code     = models.CharField(max_length=50, blank=True, null=True)
-    remark       = models.TextField(blank=True, null=True)
-    image        = models.ImageField(upload_to='menu_items/', blank=True, null=True)
-    username     = models.CharField(max_length=100)
-    client_id    = models.CharField(max_length=100, default='')
+    price2       = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    price3       = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     created_at   = models.DateTimeField(auto_now_add=True)
     updated_at   = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering        = ['category', 'name']
-        unique_together = ['username', 'session_code']
+        db_table        = 'sessional_prices'
+        ordering        = ['session_name']
+        unique_together = ['menu_item', 'session_name']
+        verbose_name        = 'Sessional Price'
+        verbose_name_plural = 'Sessional Prices'
 
     def __str__(self):
-        return f"{self.session_code} - {self.name}"
+        return f"{self.menu_item.name} — {self.session_name} (₹{self.price1})"
 
 
 class AppUser(models.Model):
-    """
-    Single user table for all 3 login types.
-
-    user_type = 'superadmin'
-        - company is NULL
-        - Sees all companies, creates company admins
-        - Login: secret_code + username + password
-
-    user_type = 'admin'  (Company Admin)
-        - company = FK to their CompanyInfo
-        - Sees own company data only
-        - Login: username + password  (via /company-login/)
-
-    user_type = 'user'  (Staff)
-        - company = FK to their CompanyInfo (same as their admin)
-        - Sees only pages in allowed_pages
-        - Login: username + password  (via /staff-login/)
-
-    Isolation rule:
-        Every DB query for menu items / orders / tables must filter by
-        client_id = user.company.client_id  so cross-company leakage is
-        impossible at the data layer.
-    """
     USER_TYPE_CHOICES = [
         ('superadmin', 'Super Admin'),
         ('admin',      'Company Admin'),
         ('user',       'Staff'),
     ]
+    ROLE_CHOICES = [
+        ('waiter',  'Waiter'),
+        ('cashier', 'Cashier'),
+        ('both',    'Both'),
+    ]
 
-    company   = models.ForeignKey(
+    company    = models.ForeignKey(
         CompanyInfo, on_delete=models.CASCADE,
-        null=True, blank=True, related_name='users',
-        help_text='NULL only for superadmin accounts.'
+        null=True, blank=True, related_name='users'
     )
-    username  = models.CharField(max_length=100, unique=True)
-    password  = models.CharField(max_length=255)
-    full_name = models.CharField(max_length=200, blank=True, null=True)
-    user_type = models.CharField(max_length=20, choices=USER_TYPE_CHOICES, default='user')
-    role      = models.CharField(
-        max_length=20, blank=True, null=True,
-        help_text="Staff role: 'waiter', 'kitchen', or 'both'."
-    )
-    allowed_pages = models.JSONField(
-        blank=True, null=True, default=None,
-        help_text="Pages this staff user can access. NULL = not set."
-    )
-
+    username   = models.CharField(max_length=100, unique=True)
+    password   = models.CharField(max_length=255)
+    full_name  = models.CharField(max_length=200, blank=True, null=True)
+    user_type  = models.CharField(max_length=20, choices=USER_TYPE_CHOICES, default='user')
+    role       = models.CharField(max_length=20, choices=ROLE_CHOICES, default='both', blank=True, null=True)
+    allowed_pages = models.JSONField(blank=True, null=True, default=None)
     plain_password = models.CharField(max_length=255, blank=True, null=True,
                         help_text='Stored in plain text for Super Admin visibility only.')
     is_active  = models.BooleanField(default=True)
@@ -274,6 +284,16 @@ class AppUser(models.Model):
 
 
 class Customization(models.Model):
+    # ── TV Theme Layout ────────────────────────────────────────────────────────
+    # 'theme1' = Dark Card Grid (original)
+    # 'theme2' = Cinematic Fullscreen (banner slides → menu slides)
+    # 'theme3' = Elegant Warm Split (category-grouped list)
+    TV_THEME_CHOICES = [
+        ('theme1', 'Dark Card Grid'),
+        ('theme2', 'Cinematic Fullscreen'),
+        ('theme3', 'Elegant Warm Split'),
+    ]
+
     username          = models.CharField(max_length=100, unique=True)
     background_color  = models.CharField(max_length=20, default='#f9fafb')
     font_color        = models.CharField(max_length=20, default='#000000')
@@ -290,10 +310,27 @@ class Customization(models.Model):
     tv_text_color       = models.CharField(max_length=20, default='#ffffff', blank=True, null=True)
     tv_accent_color     = models.CharField(max_length=20, default='#9333ea', blank=True, null=True)
     tv_card_bg_color    = models.CharField(max_length=20, default='#1f2937', blank=True, null=True)
+
+    # ── NEW: TV layout theme selector ──────────────────────────────────────────
+    tv_theme            = models.CharField(
+        max_length=20, choices=TV_THEME_CHOICES, default='theme1',
+        blank=True, null=True,
+        help_text='Which TV display layout/theme to use on the MenuDisplay screen.'
+    )
+
     logo_shape = models.CharField(max_length=20, default='round', blank=True, null=True)
     logo    = models.ImageField(upload_to='logos/',    blank=True, null=True)
     tv_logo = models.ImageField(upload_to='tv_logos/', blank=True, null=True)
     banner  = models.ImageField(upload_to='banners/',  blank=True, null=True)
+
+    # ── Theme 2 background images (left + right panel) ────────────────────────
+    tv_theme2_left  = models.FileField(upload_to='tv_theme2/', blank=True, null=True)
+    tv_theme2_right = models.FileField(upload_to='tv_theme2/', blank=True, null=True)
+
+    # ── Theme 3 media (banner image + video) ──────────────────────────────────
+    tv_theme3_image = models.ImageField(upload_to='tv_theme3/', blank=True, null=True)
+    tv_theme3_video = models.FileField(upload_to='tv_theme3/',  blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -327,7 +364,8 @@ class Banner(models.Model):
 class TVBanner(models.Model):
     client_id  = models.CharField(max_length=100, db_index=True)
     username   = models.CharField(max_length=100, db_index=True)
-    image      = models.ImageField(upload_to='tv_banners/')
+    # FileField instead of ImageField so videos (mp4/webm) are accepted alongside images
+    image      = models.FileField(upload_to='tv_banners/')
     order      = models.PositiveIntegerField(default=0)
     plain_password = models.CharField(max_length=255, blank=True, null=True,
                         help_text='Stored in plain text for Super Admin visibility only.')
