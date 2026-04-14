@@ -6,11 +6,14 @@
 # UPDATED: Added meal_type to MenuItemSerializer
 # UPDATED: Added MealTypeSerializer
 # UPDATED: Added tv_theme to CustomizationSerializer
+# UPDATED: TableSerializer now includes table_type, occupied_seats, availability_status,
+#          free_seats, and color_code for Petpooja-style table management UI
 
 from rest_framework import serializers
 from .models import MenuItem, Category, Tax, AppUser, CompanyInfo
 from .models import Customization, Banner, TVBanner, Table, Order, OrderItem
 from .models import MealType, Kitchen, SessionalPrice
+from .models import BillingRecord
 
 
 def _build_url(request, url):
@@ -202,49 +205,101 @@ class BannerSerializer(serializers.ModelSerializer):
 # ============================================
 
 class TVBannerSerializer(serializers.ModelSerializer):
-    image_url  = serializers.SerializerMethodField()
-    media_type = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
 
     class Meta:
         model  = TVBanner
-        fields = [
-            'id', 'client_id', 'username',
-            'image', 'image_url', 'media_type',
-            'order', 'is_active',
-            'created_at', 'updated_at',
-        ]
-        read_only_fields = ['id', 'image_url', 'media_type', 'created_at', 'updated_at']
+        fields = ['id', 'client_id', 'username', 'image', 'image_url', 'order', 'is_active', 'created_at']
+        read_only_fields = ['id', 'image_url', 'created_at']
 
     def get_image_url(self, obj):
-        if obj.image and hasattr(obj.image, 'url'):
+        if obj.image:
             return _build_url(self.context.get('request'), obj.image.url)
         return None
 
-    def get_media_type(self, obj):
-        """Return 'video' for mp4/webm/ogg/mov files, 'image' for everything else."""
-        if obj.image and obj.image.name:
-            ext = obj.image.name.rsplit('.', 1)[-1].lower()
-            if ext in ('mp4', 'webm', 'ogg', 'mov'):
-                return 'video'
-        return 'image'
-
 
 # ============================================
-# TABLE SERIALIZER
+# TABLE SERIALIZER  ← UPDATED for table management
 # ============================================
 
 class TableSerializer(serializers.ModelSerializer):
+    # ── Computed / read-only fields for the UI ────────────────────────────────
+
+    availability_status = serializers.SerializerMethodField(
+        help_text="'free' | 'partial' | 'full'  — derived from occupied_seats vs capacity"
+    )
+    free_seats = serializers.SerializerMethodField(
+        help_text="capacity minus occupied_seats"
+    )
+    color_code = serializers.SerializerMethodField(
+        help_text=(
+            "Hex color for the UI card border/background: "
+            "#22c55e (green=free) | #f59e0b (amber=partial) | #ef4444 (red=full)"
+        )
+    )
+
     class Meta:
-        model = Table
+        model  = Table
         fields = [
             'id', 'client_id', 'username',
-            'table_number', 'table_name', 'capacity', 'status',
+            'table_number', 'table_name',
+            'capacity',
+            # ── new fields ──────────────────────────
+            'table_type',       # 'sharing' | 'sitting'
+            'occupied_seats',   # live count, managed by order lifecycle
+            # ── computed ─────────────────────────────
+            'availability_status',  # 'free' | 'partial' | 'full'
+            'free_seats',           # capacity - occupied_seats
+            'color_code',           # hex string for UI
+            # ─────────────────────────────────────────
+            'status',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id',
+            'availability_status', 'free_seats', 'color_code',
+            'created_at', 'updated_at',
+        ]
+        extra_kwargs = {
+            'table_name':     {'required': False, 'allow_null': True, 'allow_blank': True},
+            'table_type':     {'required': False},   # defaults to 'sitting' in the model
+            'occupied_seats': {'required': False},   # default 0; managed by order views
+        }
+
+    # ── computed field implementations ───────────────────────────────────────
+
+    def get_availability_status(self, obj):
+        """
+        free    → occupied_seats == 0
+        partial → sharing table with some but not all seats taken
+        full    → sitting table with any occupant, OR sharing table at capacity
+        """
+        if obj.occupied_seats == 0:
+            return 'free'
+        if obj.table_type == 'sitting' or obj.occupied_seats >= obj.capacity:
+            return 'full'
+        return 'partial'
+
+    def get_free_seats(self, obj):
+        return max(0, obj.capacity - obj.occupied_seats)
+
+    def get_color_code(self, obj):
+        """
+        🟢 #22c55e  — free   (Tailwind green-500)
+        🟡 #f59e0b  — partial (Tailwind amber-400)
+        🔴 #ef4444  — full   (Tailwind red-500)
+        """
+        status = self.get_availability_status(obj)
+        return {
+            'free':    '#22c55e',
+            'partial': '#f59e0b',
+            'full':    '#ef4444',
+        }[status]
+
+    # ── validation ────────────────────────────────────────────────────────────
 
     def validate(self, data):
-        username     = data.get('username', getattr(self.instance, 'username', None))
+        username     = data.get('username',     getattr(self.instance, 'username',     None))
         table_number = data.get('table_number', getattr(self.instance, 'table_number', None))
         qs = Table.objects.filter(username=username, table_number=table_number)
         if self.instance:
@@ -252,6 +307,14 @@ class TableSerializer(serializers.ModelSerializer):
         if qs.exists():
             raise serializers.ValidationError(
                 {'table_number': f"Table '{table_number}' already exists for this restaurant."}
+            )
+
+        # occupied_seats must never exceed capacity
+        capacity       = data.get('capacity',       getattr(self.instance, 'capacity',       4))
+        occupied_seats = data.get('occupied_seats', getattr(self.instance, 'occupied_seats', 0))
+        if occupied_seats > capacity:
+            raise serializers.ValidationError(
+                {'occupied_seats': 'occupied_seats cannot exceed capacity.'}
             )
         return data
 
@@ -335,6 +398,19 @@ class CustomizationSerializer(serializers.ModelSerializer):
         if obj.logo:
             return _build_url(self.context.get('request'), obj.logo.url)
         return None
+
+
+# ============================================
+# BillingRecord Serializer
+# ============================================
+class BillingRecordSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BillingRecord
+        fields = [
+            'billing_id', 'client_id', 'username', 'order_id', 'customer_name',
+            'table_number', 'table_name', 'items', 'subtotal', 'tax_amount', 'total_amount', 'created_at'
+        ]
+        read_only_fields = ['created_at']
 
     def get_banner_url(self, obj):
         if obj.banner:

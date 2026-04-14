@@ -9,6 +9,8 @@
 # UPDATED: Added tv_theme field to Customization for TV layout selection
 # UPDATED: Added price_category field to MenuItem (regular / sessional)
 # UPDATED: Added SessionalPrice model for sessional price rows per MenuItem
+# UPDATED: Added table_type ('sharing' | 'sitting') and occupied_seats to Table model
+#          occupied_seats is auto-managed by create_order / update_order_status / cancel_order
 
 from django.db import models
 from django.db.models import Sum
@@ -179,124 +181,109 @@ class MenuItem(models.Model):
     price_type     = models.CharField(max_length=10, choices=PRICE_TYPE_CHOICES, default='single')
     price_category = models.CharField(
         max_length=10, choices=PRICE_CATEGORY_CHOICES, default='regular',
-        help_text='Whether this item uses a regular fixed price or sessional pricing.'
+        help_text='Regular price or Sessional (time-based) price.'
     )
-
-    # Kitchen that prepares this item (nullable = unassigned)
-    kitchen      = models.ForeignKey(
-        Kitchen, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='menu_items',
-        help_text='Kitchen assigned to prepare this item.'
-    )
-
-    meal_type    = models.JSONField(
+    meal_type = models.JSONField(
         blank=True, null=True, default=list,
-        help_text='List of MealType IDs this item is available for. Empty = all day.'
+        help_text='List of MealType IDs (strings) this item belongs to.'
     )
     remark   = models.TextField(blank=True, null=True)
-    price1   = models.DecimalField(max_digits=10, decimal_places=2)
-    price2   = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    price3   = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    tax      = models.DecimalField(max_digits=5,  decimal_places=2, null=True, blank=True)
+    price1   = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    price2   = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    price3   = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    tax      = models.ForeignKey(Tax, on_delete=models.SET_NULL, null=True, blank=True, related_name='items')
     hsn_code = models.CharField(max_length=20, blank=True, null=True)
     image    = models.ImageField(upload_to='menu_items/', blank=True, null=True)
-    username  = models.CharField(max_length=100)
-    client_id = models.CharField(max_length=100, default='', db_index=True)
+    kitchen  = models.ForeignKey(
+        Kitchen, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='menu_items',
+        help_text='Which kitchen prepares this item.'
+    )
+    username   = models.CharField(max_length=100)
+    client_id  = models.CharField(max_length=100, default='', db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'menu_items'
         ordering = ['category', 'name']
+        indexes  = [models.Index(fields=['client_id', 'username', 'status'])]
 
     def __str__(self):
-        return f"{self.name} ({self.category})"
+        return f"{self.name} ({self.username})"
 
 
 # ─────────────────────────────────────────────────────────────
 # SESSIONAL PRICE MODEL
-# Each row represents one session slot for a MenuItem.
-# Only relevant when MenuItem.price_category == 'sessional'.
-# price1 is always required; price2 / price3 mirror MenuItem's
-# portion / combo semantics and are optional.
 # ─────────────────────────────────────────────────────────────
 class SessionalPrice(models.Model):
-    menu_item    = models.ForeignKey(
-        MenuItem, on_delete=models.CASCADE, related_name='sessional_prices',
-        help_text='The menu item this sessional price belongs to.'
-    )
-    session_name = models.CharField(
-        max_length=100,
-        help_text='Label for this price session, e.g. "Breakfast", "Happy Hour".'
-    )
+    menu_item    = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name='sessional_prices')
+    session_name = models.CharField(max_length=100, help_text='e.g. Breakfast, Lunch, Dinner')
     price1       = models.DecimalField(max_digits=10, decimal_places=2)
-    price2       = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    price3       = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    price2       = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    price3       = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     created_at   = models.DateTimeField(auto_now_add=True)
     updated_at   = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table        = 'sessional_prices'
-        ordering        = ['session_name']
-        unique_together = ['menu_item', 'session_name']
-        verbose_name        = 'Sessional Price'
-        verbose_name_plural = 'Sessional Prices'
+        db_table = 'sessional_prices'
+        ordering = ['session_name']
 
     def __str__(self):
-        return f"{self.menu_item.name} — {self.session_name} (₹{self.price1})"
+        return f"{self.menu_item.name} — {self.session_name}"
 
 
+# ─────────────────────────────────────────────────────────────
+# APP USER MODEL
+# ─────────────────────────────────────────────────────────────
 class AppUser(models.Model):
     USER_TYPE_CHOICES = [
         ('superadmin', 'Super Admin'),
         ('admin',      'Company Admin'),
         ('user',       'Staff'),
     ]
-    ROLE_CHOICES = [
-        ('waiter',  'Waiter'),
-        ('cashier', 'Cashier'),
-        ('both',    'Both'),
-    ]
 
-    company    = models.ForeignKey(
+    username      = models.CharField(max_length=100, unique=True)
+    password      = models.CharField(max_length=255)
+    full_name     = models.CharField(max_length=200, blank=True, null=True)
+    user_type     = models.CharField(max_length=20, choices=USER_TYPE_CHOICES, default='user')
+    role          = models.CharField(max_length=50, blank=True, null=True,
+                        help_text='Staff role: waiter | cashier | both')
+    is_active     = models.BooleanField(default=True)
+    company       = models.ForeignKey(
         CompanyInfo, on_delete=models.CASCADE,
-        null=True, blank=True, related_name='users'
+        related_name='users', null=True, blank=True
     )
-    username   = models.CharField(max_length=100, unique=True)
-    password   = models.CharField(max_length=255)
-    full_name  = models.CharField(max_length=200, blank=True, null=True)
-    user_type  = models.CharField(max_length=20, choices=USER_TYPE_CHOICES, default='user')
-    role       = models.CharField(max_length=20, choices=ROLE_CHOICES, default='both', blank=True, null=True)
     allowed_pages = models.JSONField(blank=True, null=True, default=None)
     plain_password = models.CharField(max_length=255, blank=True, null=True,
                         help_text='Stored in plain text for Super Admin visibility only.')
-    is_active  = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at    = models.DateTimeField(auto_now_add=True)
+    updated_at    = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'app_users'
-        ordering = ['-created_at']
+        indexes  = [
+            models.Index(fields=['username']),
+            models.Index(fields=['user_type', 'is_active']),
+        ]
 
     def __str__(self):
-        cid = self.company.client_id if self.company else 'SUPER'
-        return f"{cid} - {self.username} ({self.user_type})"
+        return f"{self.username} ({self.user_type})"
 
 
+# ─────────────────────────────────────────────────────────────
+# CUSTOMIZATION MODEL
+# ─────────────────────────────────────────────────────────────
 class Customization(models.Model):
-    # ── TV Theme Layout ────────────────────────────────────────────────────────
-    # 'theme1' = Dark Card Grid (original)
-    # 'theme2' = Cinematic Fullscreen (banner slides → menu slides)
-    # 'theme3' = Elegant Warm Split (category-grouped list)
     TV_THEME_CHOICES = [
-        ('theme1', 'Dark Card Grid'),
-        ('theme2', 'Cinematic Fullscreen'),
-        ('theme3', 'Elegant Warm Split'),
+        ('theme1', 'Theme 1 — Classic'),
+        ('theme2', 'Theme 2 — Split Panel'),
+        ('theme3', 'Theme 3 — Media Banner'),
     ]
 
     username          = models.CharField(max_length=100, unique=True)
-    background_color  = models.CharField(max_length=20, default='#f9fafb')
-    font_color        = models.CharField(max_length=20, default='#000000')
+    background_color  = models.CharField(max_length=20, default='#ffffff')
+    font_color        = models.CharField(max_length=20, default='#1f2937')
     header_color      = models.CharField(max_length=20, default='#7c3aed')
     accent_color      = models.CharField(max_length=20, default='#10b981')
     header_bg_color   = models.CharField(max_length=20, default='#6366f1', blank=True, null=True)
@@ -311,7 +298,7 @@ class Customization(models.Model):
     tv_accent_color     = models.CharField(max_length=20, default='#9333ea', blank=True, null=True)
     tv_card_bg_color    = models.CharField(max_length=20, default='#1f2937', blank=True, null=True)
 
-    # ── NEW: TV layout theme selector ──────────────────────────────────────────
+    # ── TV layout theme selector ──────────────────────────────────────────
     tv_theme            = models.CharField(
         max_length=20, choices=TV_THEME_CHOICES, default='theme1',
         blank=True, null=True,
@@ -384,14 +371,40 @@ class TVBanner(models.Model):
         return f"TVBanner [{self.username}] order={self.order}"
 
 
+# ─────────────────────────────────────────────────────────────
+# TABLE MODEL  ← UPDATED: added table_type and occupied_seats
+# ─────────────────────────────────────────────────────────────
 class Table(models.Model):
     STATUS_CHOICES = [('active', 'Active'), ('inactive', 'Inactive')]
+
+    # ── NEW: sharing = multiple groups can share seats
+    #        sitting = whole table is reserved as one unit
+    TABLE_TYPE_CHOICES = [
+        ('sharing', 'Sharing'),
+        ('sitting', 'Sitting / Fixed'),
+    ]
 
     client_id    = models.CharField(max_length=100, db_index=True)
     username     = models.CharField(max_length=100, db_index=True)
     table_number = models.CharField(max_length=50)
     table_name   = models.CharField(max_length=100, blank=True, null=True)
     capacity     = models.PositiveIntegerField(default=4)
+
+    # ── NEW FIELD: sharing | sitting ──────────────────────────────────────────
+    table_type   = models.CharField(
+        max_length=10, choices=TABLE_TYPE_CHOICES, default='sitting',
+        help_text=(
+            'sitting = the whole table is booked as one unit; '
+            'sharing = multiple independent groups can occupy spare seats.'
+        )
+    )
+
+    # ── NEW FIELD: live seat count — managed by order create/complete/cancel ──
+    occupied_seats = models.PositiveIntegerField(
+        default=0,
+        help_text='Current number of occupied seats. Auto-managed by order lifecycle.'
+    )
+
     status       = models.CharField(max_length=10, choices=STATUS_CHOICES, default='active')
     created_at   = models.DateTimeField(auto_now_add=True)
     updated_at   = models.DateTimeField(auto_now=True)
@@ -405,6 +418,31 @@ class Table(models.Model):
     def __str__(self):
         label = f" — {self.table_name}" if self.table_name else ""
         return f"Table {self.table_number}{label} ({self.username})"
+
+    # ── Computed availability status (no extra DB column needed) ──────────────
+    @property
+    def availability_status(self):
+        """
+        Returns:
+          'free'    — no seats occupied
+          'partial' — some seats occupied (sharing tables only)
+          'full'    — all seats occupied (or sitting table with any occupant)
+        """
+        if self.occupied_seats == 0:
+            return 'free'
+        if self.table_type == 'sitting' or self.occupied_seats >= self.capacity:
+            return 'full'
+        return 'partial'
+
+    def release_seats(self, count):
+        """Safely decrement occupied_seats, never below 0."""
+        self.occupied_seats = max(0, self.occupied_seats - count)
+        self.save(update_fields=['occupied_seats', 'updated_at'])
+
+    def occupy_seats(self, count):
+        """Increment occupied_seats, capped at capacity."""
+        self.occupied_seats = min(self.capacity, self.occupied_seats + count)
+        self.save(update_fields=['occupied_seats', 'updated_at'])
 
 
 class Order(models.Model):
@@ -476,3 +514,28 @@ class OrderItem(models.Model):
     @property
     def item_total_with_tax(self):
         return self.item_total + self.tax_amount
+
+
+# ─────────────────────────────────────────────────────────────
+# BillingRecord model — stores printed/saved bills for reporting
+# ─────────────────────────────────────────────────────────────
+class BillingRecord(models.Model):
+    billing_id   = models.CharField(max_length=100, unique=True, primary_key=True)
+    client_id    = models.CharField(max_length=100, db_index=True, blank=True, null=True)
+    username     = models.CharField(max_length=100, db_index=True, blank=True, null=True)
+    order_id     = models.IntegerField(blank=True, null=True)
+    customer_name = models.CharField(max_length=200, blank=True, null=True)
+    table_number = models.CharField(max_length=50, blank=True, null=True)
+    table_name   = models.CharField(max_length=200, blank=True, null=True)
+    items        = models.JSONField(blank=True, null=True, default=list)
+    subtotal     = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    tax_amount   = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'billing_records'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Billing {self.billing_id} — Order {self.order_id} ({self.total_amount})"

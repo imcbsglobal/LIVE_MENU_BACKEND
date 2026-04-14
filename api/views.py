@@ -20,7 +20,7 @@ from channels.layers import get_channel_layer
 from .models import (
     MenuItem, Category, Tax, AppUser, CompanyInfo,
     Customization, Banner, TVBanner, Table, Order, OrderItem,
-    MealType, Kitchen, SessionalPrice,  # ← SessionalPrice ADDED
+    MealType, Kitchen, SessionalPrice, BillingRecord,  # ← SessionalPrice ADDED
 )
 from .serializers import (
     MenuItemSerializer, CategorySerializer, TaxSerializer,
@@ -29,6 +29,7 @@ from .serializers import (
     TableSerializer, OrderSerializer, OrderCreateSerializer,
     MealTypeSerializer, KitchenSerializer,   # ← KitchenSerializer ADDED
     SessionalPriceSerializer,                # ← SessionalPriceSerializer ADDED
+    BillingRecordSerializer,
 )
 import requests
 
@@ -1424,6 +1425,29 @@ def get_public_menu(request):
         except Customization.DoesNotExist:
             pass
 
+    # ── Table info (capacity / occupancy) for the QR customer ───────────────
+    table_number_param = request.query_params.get('table', '').strip()
+    table_info = {}
+    if table_number_param and username:
+        try:
+            tbl = Table.objects.get(
+                client_id=client_id,
+                username=username,
+                table_number=table_number_param,
+                status='active',
+            )
+            table_info = {
+                'table_number':        tbl.table_number,
+                'table_name':          tbl.table_name,
+                'capacity':            tbl.capacity,
+                'table_type':          tbl.table_type,
+                'occupied_seats':      tbl.occupied_seats,
+                'free_seats':          max(0, tbl.capacity - tbl.occupied_seats),
+                'availability_status': tbl.availability_status,
+            }
+        except Table.DoesNotExist:
+            pass
+
     return Response({
         'success': True,
         'company': {
@@ -1437,7 +1461,59 @@ def get_public_menu(request):
         'menu_items':    items_data,
         'customization': customization_data,
         'username':      username,
+        'table_info':    table_info,
     })
+
+
+
+# ─────────────────────────────────────────────────────────────
+# Save billing report (called by frontend on Save & Print)
+# POST /api/billings/save/
+# Body: billing object (billing_id, order_id, customer_name, table_number,
+#       table_name, items[], subtotal, tax_amount, total_amount, client_id, username)
+# ─────────────────────────────────────────────────────────────
+@api_view(['POST'])
+def save_billing(request):
+    try:
+        data = request.data
+        serializer = BillingRecordSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({'success': True, 'billing': serializer.data}, status=status.HTTP_201_CREATED)
+        return Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({'success': False, 'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─────────────────────────────────────────────────────────────
+# GET billing report
+# GET /api/billings/?client_id=&username=&date_from=&date_to=
+# Returns paginated list of saved BillingRecords for reporting.
+# ─────────────────────────────────────────────────────────────
+@api_view(['GET'])
+def get_billings(request):
+    try:
+        client_id = request.query_params.get('client_id', '').strip()
+        username  = request.query_params.get('username', '').strip()
+        date_from = request.query_params.get('date_from', '').strip()
+        date_to   = request.query_params.get('date_to', '').strip()
+
+        if not client_id or not username:
+            return Response({'success': False, 'detail': 'client_id and username are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = BillingRecord.objects.filter(client_id=client_id, username=username)
+
+        if date_from:
+            qs = qs.filter(created_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(created_at__date__lte=date_to)
+
+        qs = qs.order_by('-created_at')
+
+        serializer = BillingRecordSerializer(qs, many=True)
+        return Response({'success': True, 'billings': serializer.data, 'count': qs.count()})
+    except Exception as e:
+        return Response({'success': False, 'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1476,11 +1552,78 @@ def _ws_payload(order):
     }
 
 
+def _occupy_table_seats(client_id, username, table_number, member_count):
+    """
+    Increment occupied_seats on the matching Table by member_count.
+    Uses the actual member_count for both sitting and sharing tables so the
+    display shows e.g. 3/6 instead of 6/6 when only 3 members placed an order.
+    Safe to call; silently skips if table not found.
+    """
+    try:
+        table = Table.objects.get(
+            client_id=client_id,
+            username=username,
+            table_number=table_number,
+            status='active',
+        )
+        # Both sitting and sharing: add the real member count, capped at capacity.
+        # _release_table_seats handles the correct reset logic per table type on
+        # order completion / cancellation.
+        table.occupied_seats = min(table.capacity, table.occupied_seats + member_count)
+        table.save(update_fields=['occupied_seats', 'updated_at'])
+    except Table.DoesNotExist:
+        pass  # Table not registered — skip silently
+
+
+def _release_table_seats(client_id, username, table_number, member_count):
+    """
+    Decrement occupied_seats on the matching Table by member_count.
+    For sitting tables, reset to 0 only when no more active (non-terminal) orders remain.
+    Safe to call; silently skips if table not found.
+    """
+    try:
+        table = Table.objects.get(
+            client_id=client_id,
+            username=username,
+            table_number=table_number,
+            status='active',
+        )
+        if table.table_type == 'sitting':
+            # For sitting tables: reset to 0 only when ALL orders are done;
+            # otherwise subtract the seats from this specific completed order so
+            # the displayed count stays accurate (e.g. 3/6 → 0/6 when the last
+            # active order is finished).
+            active_orders = Order.objects.filter(
+                client_id=client_id,
+                username=username,
+                table_number=table_number,
+            ).exclude(status__in=['completed', 'cancelled']).count()
+            if active_orders == 0:
+                table.occupied_seats = 0
+            else:
+                table.occupied_seats = max(0, table.occupied_seats - member_count)
+        else:
+            # Sharing table: release only the seats belonging to this order
+            table.occupied_seats = max(0, table.occupied_seats - member_count)
+        table.save(update_fields=['occupied_seats', 'updated_at'])
+    except Table.DoesNotExist:
+        pass  # Table not registered — skip silently
+
+
 @api_view(['POST'])
 def create_order(request):
     s = OrderCreateSerializer(data=request.data)
     if s.is_valid():
         order = s.save()
+
+        # ── Update table occupied seats ──────────────────────────────────────
+        _occupy_table_seats(
+            client_id    = order.client_id,
+            username     = order.username,
+            table_number = order.table_number,
+            member_count = order.member_count or 1,
+        )
+
         if channel_layer:
             try:
                 fresh = Order.objects.prefetch_related('order_items').get(id=order.id)
@@ -1543,9 +1686,21 @@ def update_order_status(request, order_id):
     if not new_status:
         return Response({'success': False, 'message': 'status required.'}, status=400)
     try:
-        order = Order.objects.get(id=order_id)
+        order      = Order.objects.get(id=order_id)
+        old_status = order.status
         order.status = new_status
         order.save()
+
+        # ── Release table seats when order moves to a terminal state ─────────
+        terminal_statuses = ('completed', 'cancelled')
+        if new_status in terminal_statuses and old_status not in terminal_statuses:
+            _release_table_seats(
+                client_id    = order.client_id,
+                username     = order.username,
+                table_number = order.table_number,
+                member_count = order.member_count or 1,
+            )
+
         return Response({'success': True, 'order': OrderSerializer(order).data})
     except Order.DoesNotExist:
         return Response({'success': False, 'message': 'Order not found.'}, status=404)
@@ -1559,6 +1714,15 @@ def cancel_order(request, order_id):
             return Response({'success': False, 'message': f'Cannot cancel — status is "{order.status}".'}, status=400)
         order.status = 'cancelled'
         order.save()
+
+        # ── Release table seats on cancellation ──────────────────────────────
+        _release_table_seats(
+            client_id    = order.client_id,
+            username     = order.username,
+            table_number = order.table_number,
+            member_count = order.member_count or 1,
+        )
+
         return Response({'success': True, 'order': OrderSerializer(order).data})
     except Order.DoesNotExist:
         return Response({'success': False, 'message': 'Order not found.'}, status=404)

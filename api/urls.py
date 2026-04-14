@@ -45,6 +45,8 @@ from .views import (
     create_order, get_orders, get_order_detail,
     update_order_status, cancel_order, get_order_stats, accept_order,
     get_public_menu,
+    save_billing,
+    get_billings,
 )
 
 router = DefaultRouter()
@@ -128,6 +130,8 @@ urlpatterns = [
     path('orders/<int:order_id>/status/', update_order_status, name='update-order-status'),
     path('orders/<int:order_id>/cancel/', cancel_order,        name='cancel-order'),
     path('orders/<int:order_id>/accept/', accept_order,        name='accept-order'),
+    path('billings/save/',               save_billing,          name='save-billing'),
+    path('billings/',                    get_billings,          name='get-billings'),
 
     # ── Public / Customer Menu (QR scan, no auth) ────────────────────────────
     path('public/menu/', get_public_menu, name='public-menu'),
