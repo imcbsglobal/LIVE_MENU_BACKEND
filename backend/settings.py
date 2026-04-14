@@ -32,8 +32,8 @@ DEBUG = True
 ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
-    'livemenu.imcbs.com',
-    'www.livemenu.imcbs.com',
+    'melone.in',
+    'www.melone.in',
 ]
 
 # Allow all 192.168.1.x IPs in development (any device on the local network)
