@@ -176,8 +176,9 @@ class MenuItemViewSet(viewsets.ModelViewSet):
 
     # ── create ───────────────────────────────────────────────
     def create(self, request, *args, **kwargs):
-        sessional_prices_data = request.data.pop('sessional_prices', None)
-        serializer = self.get_serializer(data=request.data)
+        data = request.data.copy()
+        sessional_prices_data = data.pop('sessional_prices', None)
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         menu_item = serializer.save()
 
@@ -196,10 +197,11 @@ class MenuItemViewSet(viewsets.ModelViewSet):
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
 
-        # Pop sessional_prices before passing to serializer
-        sessional_prices_data = request.data.pop('sessional_prices', None)
+        # Copy before popping — request.data is immutable for multipart/form-data
+        data = request.data.copy()
+        sessional_prices_data = data.pop('sessional_prices', None)
 
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer = self.get_serializer(instance, data=data, partial=partial)
         serializer.is_valid(raise_exception=True)
         menu_item = serializer.save()
 
