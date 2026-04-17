@@ -398,6 +398,51 @@ class CustomizationSerializer(serializers.ModelSerializer):
         if obj.logo:
             return _build_url(self.context.get('request'), obj.logo.url)
         return None
+    
+    def get_banner_url(self, obj):
+        if obj.banner:
+            return _build_url(self.context.get('request'), obj.banner.url)
+        return None
+
+    def get_tv_logo_url(self, obj):
+        if obj.tv_logo:
+            return _build_url(self.context.get('request'), obj.tv_logo.url)
+        return None
+
+    def get_tv_theme2_left_url(self, obj):
+        if obj.tv_theme2_left:
+            return _build_url(self.context.get('request'), obj.tv_theme2_left.url)
+        return None
+
+    def get_tv_theme2_right_url(self, obj):
+        if obj.tv_theme2_right:
+            return _build_url(self.context.get('request'), obj.tv_theme2_right.url)
+        return None
+
+    def get_tv_theme3_image_url(self, obj):
+        if obj.tv_theme3_image:
+            return _build_url(self.context.get('request'), obj.tv_theme3_image.url)
+        return None
+
+    def get_tv_theme3_video_url(self, obj):
+        if obj.tv_theme3_video:
+            return _build_url(self.context.get('request'), obj.tv_theme3_video.url)
+        return None
+
+    def get_banners(self, obj):
+        request   = self.context.get('request')
+        client_id = None
+        if request:
+            client_id = request.query_params.get('client_id')
+        if client_id:
+            banners = Banner.objects.filter(
+                username=obj.username, client_id=client_id, is_active=True
+            ).order_by('order')
+        else:
+            banners = Banner.objects.filter(
+                username=obj.username, is_active=True
+            ).order_by('order')
+        return BannerSerializer(banners, many=True, context={'request': request}).data
 
 
 # ============================================
