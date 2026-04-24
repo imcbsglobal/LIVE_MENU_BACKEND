@@ -1152,6 +1152,31 @@ def save_customization(request):
             except Exception: pass
         c.tv_theme3_video = tv_theme3_video
 
+    # ── Delete flags (sent when user removes a saved image/video) ──────────────
+    if request.data.get('delete_tv_theme2_left') == 'true':
+        if c.tv_theme2_left:
+            try: c.tv_theme2_left.delete(save=False)
+            except Exception: pass
+        c.tv_theme2_left = None
+
+    if request.data.get('delete_tv_theme2_right') == 'true':
+        if c.tv_theme2_right:
+            try: c.tv_theme2_right.delete(save=False)
+            except Exception: pass
+        c.tv_theme2_right = None
+
+    if request.data.get('delete_tv_theme3_image') == 'true':
+        if c.tv_theme3_image:
+            try: c.tv_theme3_image.delete(save=False)
+            except Exception: pass
+        c.tv_theme3_image = None
+
+    if request.data.get('delete_tv_theme3_video') == 'true':
+        if c.tv_theme3_video:
+            try: c.tv_theme3_video.delete(save=False)
+            except Exception: pass
+        c.tv_theme3_video = None
+
     c.save()
     return Response({
         'success': True,
