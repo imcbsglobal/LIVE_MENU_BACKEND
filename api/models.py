@@ -7,8 +7,6 @@
 # UPDATED: Added MealType model for dynamic meal type management
 # UPDATED: Added Kitchen model for Kitchen Master
 # UPDATED: Added tv_theme field to Customization for TV layout selection
-# UPDATED: Added price_category field to MenuItem (regular / sessional)
-# UPDATED: Added SessionalPrice model for sessional price rows per MenuItem
 # UPDATED: Added table_type ('sharing' | 'sitting') and occupied_seats to Table model
 #          occupied_seats is auto-managed by create_order / update_order_status / cancel_order
 
@@ -165,11 +163,6 @@ class MenuItem(models.Model):
         ('veg',     'Vegetarian'),
         ('non_veg', 'Non-Vegetarian'),
     ]
-    PRICE_CATEGORY_CHOICES = [
-        ('regular',   'Regular Price'),
-        ('sessional', 'Sessional Price'),
-    ]
-
     session_code = models.CharField(max_length=50)
     name         = models.CharField(max_length=200)
     category     = models.ForeignKey(Category, on_delete=models.PROTECT, related_name='items')
@@ -178,11 +171,7 @@ class MenuItem(models.Model):
         max_length=10, choices=FOOD_TYPE_CHOICES, default='non_veg',
         help_text='Veg / Non-Veg indicator for the menu item.'
     )
-    price_type     = models.CharField(max_length=10, choices=PRICE_TYPE_CHOICES, default='single')
-    price_category = models.CharField(
-        max_length=10, choices=PRICE_CATEGORY_CHOICES, default='regular',
-        help_text='Regular price or Sessional (time-based) price.'
-    )
+    price_type = models.CharField(max_length=10, choices=PRICE_TYPE_CHOICES, default='single')
     meal_type = models.JSONField(
         blank=True, null=True, default=list,
         help_text='List of MealType IDs (strings) this item belongs to.'
@@ -211,26 +200,6 @@ class MenuItem(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.username})"
-
-
-# ─────────────────────────────────────────────────────────────
-# SESSIONAL PRICE MODEL
-# ─────────────────────────────────────────────────────────────
-class SessionalPrice(models.Model):
-    menu_item    = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name='sessional_prices')
-    session_name = models.CharField(max_length=100, help_text='e.g. Breakfast, Lunch, Dinner')
-    price1       = models.DecimalField(max_digits=10, decimal_places=2)
-    price2       = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    price3       = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    created_at   = models.DateTimeField(auto_now_add=True)
-    updated_at   = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = 'sessional_prices'
-        ordering = ['session_name']
-
-    def __str__(self):
-        return f"{self.menu_item.name} — {self.session_name}"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -453,6 +422,22 @@ class Order(models.Model):
         ('completed', 'Completed'),
         ('cancelled', 'Cancelled'),
     ]
+
+    # ── Order origin ──────────────────────────────────────────────────────────
+    # 'self'  = customer scanned QR code and placed the order themselves
+    # 'staff' = staff placed the order directly from the Table Status panel
+    ORDER_TYPE_CHOICES = [
+        ('self',  'Self Order (QR)'),
+        ('staff', 'Staff Order'),
+    ]
+    order_type = models.CharField(
+        max_length=10, choices=ORDER_TYPE_CHOICES, default='self',
+        db_index=True,
+        help_text=(
+            '"self" = customer QR order that requires waiter acceptance; '
+            '"staff" = direct staff order with instant billing.'
+        ),
+    )
 
     session_id     = models.CharField(max_length=100, db_index=True)
     client_id      = models.CharField(max_length=100, db_index=True)

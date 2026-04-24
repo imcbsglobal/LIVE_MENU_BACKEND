@@ -12,7 +12,7 @@
 from rest_framework import serializers
 from .models import MenuItem, Category, Tax, AppUser, CompanyInfo
 from .models import Customization, Banner, TVBanner, Table, Order, OrderItem
-from .models import MealType, Kitchen, SessionalPrice
+from .models import MealType, Kitchen
 from .models import BillingRecord
 
 
@@ -81,36 +81,27 @@ class MealTypeSerializer(serializers.ModelSerializer):
         return data
 
 
-class SessionalPriceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model  = SessionalPrice
-        fields = ['id', 'session_name', 'price1', 'price2', 'price3', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'created_at', 'updated_at']
-
-
 class MenuItemSerializer(serializers.ModelSerializer):
     category_name   = serializers.CharField(source='category.name', read_only=True)
     kitchen_name    = serializers.SerializerMethodField()
     image_url       = serializers.SerializerMethodField()
     meal_types      = serializers.SerializerMethodField()
-    sessional_prices = SessionalPriceSerializer(many=True, read_only=True)
 
     class Meta:
         model = MenuItem
         fields = [
             'id', 'session_code', 'name', 'category', 'category_name',
             'kitchen', 'kitchen_name',
-            'status', 'food_type', 'price_type', 'price_category',
+            'status', 'food_type', 'price_type',
             'meal_type',
             'meal_types',
             'remark', 'price1', 'price2', 'price3',
             'tax', 'hsn_code', 'image', 'image_url',
-            'sessional_prices',
             'username', 'client_id', 'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'created_at', 'updated_at', 'category_name',
-            'image_url', 'meal_types', 'kitchen_name', 'sessional_prices',
+            'image_url', 'meal_types', 'kitchen_name',
         ]
 
     def get_image_url(self, obj):
@@ -206,16 +197,23 @@ class BannerSerializer(serializers.ModelSerializer):
 
 class TVBannerSerializer(serializers.ModelSerializer):
     image_url = serializers.SerializerMethodField()
+    is_video  = serializers.SerializerMethodField()
 
     class Meta:
         model  = TVBanner
-        fields = ['id', 'client_id', 'username', 'image', 'image_url', 'order', 'is_active', 'created_at']
-        read_only_fields = ['id', 'image_url', 'created_at']
+        fields = ['id', 'client_id', 'username', 'image', 'image_url', 'is_video', 'order', 'is_active', 'created_at']
+        read_only_fields = ['id', 'image_url', 'is_video', 'created_at']
 
     def get_image_url(self, obj):
         if obj.image:
             return _build_url(self.context.get('request'), obj.image.url)
         return None
+
+    def get_is_video(self, obj):
+        if obj.image:
+            name = obj.image.name.lower()
+            return name.endswith(('.mp4', '.webm', '.ogg', '.mov'))
+        return False
 
 
 # ============================================
@@ -543,7 +541,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'customer_name', 'customer_phone', 'table_number',
             'waiter_name', 'member_count',
             'subtotal', 'tax_amount', 'total_amount',
-            'status', 'order_time', 'special_instructions',
+            'status', 'order_type', 'order_time', 'special_instructions',
             'order_items', 'item_count',
             'created_at', 'updated_at',
         ]
@@ -563,6 +561,10 @@ class OrderCreateSerializer(serializers.Serializer):
     total_amount   = serializers.DecimalField(max_digits=10, decimal_places=2)
     order_time     = serializers.DateTimeField()
     special_instructions = serializers.CharField(required=False, allow_blank=True)
+    order_type = serializers.ChoiceField(
+        choices=['self', 'staff'], default='self', required=False,
+        help_text='"self" for QR customer orders, "staff" for direct staff orders.'
+    )
 
     items = serializers.ListField(child=serializers.DictField(), write_only=True)
 

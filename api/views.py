@@ -20,15 +20,14 @@ from channels.layers import get_channel_layer
 from .models import (
     MenuItem, Category, Tax, AppUser, CompanyInfo,
     Customization, Banner, TVBanner, Table, Order, OrderItem,
-    MealType, Kitchen, SessionalPrice, BillingRecord,  # ← SessionalPrice ADDED
+    MealType, Kitchen, BillingRecord,
 )
 from .serializers import (
     MenuItemSerializer, CategorySerializer, TaxSerializer,
     AppUserSerializer, CompanyInfoSerializer,
     CustomizationSerializer, BannerSerializer, TVBannerSerializer,
     TableSerializer, OrderSerializer, OrderCreateSerializer,
-    MealTypeSerializer, KitchenSerializer,   # ← KitchenSerializer ADDED
-    SessionalPriceSerializer,                # ← SessionalPriceSerializer ADDED
+    MealTypeSerializer, KitchenSerializer,
     BillingRecordSerializer,
 )
 import requests
@@ -144,7 +143,7 @@ class MenuItemViewSet(viewsets.ModelViewSet):
         status_filter = self.request.query_params.get('status')
         category      = self.request.query_params.get('category')
 
-        qs = MenuItem.objects.select_related('category').prefetch_related('sessional_prices').all()
+        qs = MenuItem.objects.select_related('category').all()
         if client_id and username:
             qs = qs.filter(client_id=client_id, username=username)
         elif client_id:
@@ -156,37 +155,12 @@ class MenuItemViewSet(viewsets.ModelViewSet):
         if category:      qs = qs.filter(category__name=category)
         return qs.order_by('category', 'name')
 
-    # ── helpers ──────────────────────────────────────────────
-    def _sync_sessional_prices(self, menu_item, sessional_prices_data):
-        """
-        Replace all sessional prices for *menu_item* with the supplied list.
-        Each entry must have at minimum: { session_name, price1 }.
-        price2 / price3 are optional.
-        Passing an empty list clears all rows.
-        """
-        menu_item.sessional_prices.all().delete()
-        for entry in sessional_prices_data:
-            SessionalPrice.objects.create(
-                menu_item    = menu_item,
-                session_name = entry['session_name'],
-                price1       = entry['price1'],
-                price2       = entry.get('price2'),
-                price3       = entry.get('price3'),
-            )
-
     # ── create ───────────────────────────────────────────────
     def create(self, request, *args, **kwargs):
         data = request.data.copy()
-        sessional_prices_data = data.pop('sessional_prices', None)
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         menu_item = serializer.save()
-
-        if sessional_prices_data is not None:
-            self._sync_sessional_prices(menu_item, sessional_prices_data)
-
-        # Re-fetch so response includes freshly written sessional_prices
-        menu_item.refresh_from_db()
         return Response(
             self.get_serializer(menu_item).data,
             status=status.HTTP_201_CREATED,
@@ -196,19 +170,10 @@ class MenuItemViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
-
-        # Copy before popping — request.data is immutable for multipart/form-data
         data = request.data.copy()
-        sessional_prices_data = data.pop('sessional_prices', None)
-
         serializer = self.get_serializer(instance, data=data, partial=partial)
         serializer.is_valid(raise_exception=True)
         menu_item = serializer.save()
-
-        if sessional_prices_data is not None:
-            self._sync_sessional_prices(menu_item, sessional_prices_data)
-
-        menu_item.refresh_from_db()
         return Response(self.get_serializer(menu_item).data)
 
 
@@ -1438,14 +1403,29 @@ def get_public_menu(request):
                 table_number=table_number_param,
                 status='active',
             )
+            # Check if there is already an active self-order on this table.
+            # A "self-order" is order_type='self' with a non-terminal status.
+            active_self_order = Order.objects.filter(
+                client_id=client_id,
+                username=username,
+                table_number=table_number_param,
+                order_type='self',
+            ).exclude(status__in=['completed', 'cancelled']).first()
+
             table_info = {
-                'table_number':        tbl.table_number,
-                'table_name':          tbl.table_name,
-                'capacity':            tbl.capacity,
-                'table_type':          tbl.table_type,
-                'occupied_seats':      tbl.occupied_seats,
-                'free_seats':          max(0, tbl.capacity - tbl.occupied_seats),
-                'availability_status': tbl.availability_status,
+                'table_number':           tbl.table_number,
+                'table_name':             tbl.table_name,
+                'capacity':               tbl.capacity,
+                'table_type':             tbl.table_type,
+                'occupied_seats':         tbl.occupied_seats,
+                'free_seats':             max(0, tbl.capacity - tbl.occupied_seats),
+                'availability_status':    tbl.availability_status,
+                # True when a customer has already placed a self-order that
+                # hasn't been completed/cancelled yet. The customer-facing
+                # MobileMenu / MenuView should block a second submission.
+                'has_active_self_order':  active_self_order is not None,
+                'active_self_order_id':   active_self_order.id if active_self_order else None,
+                'active_self_order_status': active_self_order.status if active_self_order else None,
             }
         except Table.DoesNotExist:
             pass
@@ -1465,7 +1445,6 @@ def get_public_menu(request):
         'username':      username,
         'table_info':    table_info,
     })
-
 
 
 # ─────────────────────────────────────────────────────────────
