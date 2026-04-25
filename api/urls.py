@@ -49,6 +49,9 @@ from .views import (
     get_billings,
 )
 
+# ── Sale Session ──────────────────────────────────────────────────────────────
+from .views import get_current_sale_session, start_sale_session, end_sale_session
+
 router = DefaultRouter()
 router.register(r'categories', CategoryViewSet, basename='category')
 router.register(r'taxes',      TaxViewSet,      basename='tax')
@@ -132,6 +135,11 @@ urlpatterns = [
     path('orders/<int:order_id>/accept/', accept_order,        name='accept-order'),
     path('billings/save/',               save_billing,          name='save-billing'),
     path('billings/',                    get_billings,          name='get-billings'),
+
+    # ── Sale Session ──────────────────────────────────────────────────────────
+    path('sale-session/current/',            get_current_sale_session, name='sale-session-current'),
+    path('sale-session/start/',              start_sale_session,       name='sale-session-start'),
+    path('sale-session/<int:session_id>/end/', end_sale_session,       name='sale-session-end'),
 
     # ── Public / Customer Menu (QR scan, no auth) ────────────────────────────
     path('public/menu/', get_public_menu, name='public-menu'),

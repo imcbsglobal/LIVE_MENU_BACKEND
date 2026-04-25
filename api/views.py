@@ -20,7 +20,7 @@ from channels.layers import get_channel_layer
 from .models import (
     MenuItem, Category, Tax, AppUser, CompanyInfo,
     Customization, Banner, TVBanner, Table, Order, OrderItem,
-    MealType, Kitchen, BillingRecord,
+    MealType, Kitchen, BillingRecord, SaleSession,
 )
 from .serializers import (
     MenuItemSerializer, CategorySerializer, TaxSerializer,
@@ -28,7 +28,7 @@ from .serializers import (
     CustomizationSerializer, BannerSerializer, TVBannerSerializer,
     TableSerializer, OrderSerializer, OrderCreateSerializer,
     MealTypeSerializer, KitchenSerializer,
-    BillingRecordSerializer,
+    BillingRecordSerializer, SaleSessionSerializer,
 )
 import requests
 
@@ -1481,7 +1481,15 @@ def get_public_menu(request):
 @api_view(['POST'])
 def save_billing(request):
     try:
-        data = request.data
+        data = request.data.copy()
+        # ── Auto-stamp the currently active sale session for this client ──────
+        client_id = (data.get('client_id') or '').strip()
+        if client_id:
+            active_session = SaleSession.objects.filter(
+                client_id=client_id, status='active'
+            ).order_by('-started_at').first()
+            if active_session:
+                data['sale_session'] = active_session.id
         serializer = BillingRecordSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
@@ -1493,31 +1501,56 @@ def save_billing(request):
 
 # ─────────────────────────────────────────────────────────────
 # GET billing report
-# GET /api/billings/?client_id=&username=&date_from=&date_to=
-# Returns paginated list of saved BillingRecords for reporting.
+# GET /api/billings/?client_id=&username=&session_id=   ← primary (session-based)
+# GET /api/billings/?client_id=&username=&date_from=&date_to=  ← legacy fallback
+# Returns list of saved BillingRecords for the given session or date range.
 # ─────────────────────────────────────────────────────────────
 @api_view(['GET'])
 def get_billings(request):
     try:
-        client_id = request.query_params.get('client_id', '').strip()
-        username  = request.query_params.get('username', '').strip()
-        date_from = request.query_params.get('date_from', '').strip()
-        date_to   = request.query_params.get('date_to', '').strip()
+        client_id  = request.query_params.get('client_id',  '').strip()
+        username   = request.query_params.get('username',   '').strip()
+        session_id = request.query_params.get('session_id', '').strip()
+        date_from  = request.query_params.get('date_from',  '').strip()
+        date_to    = request.query_params.get('date_to',    '').strip()
 
         if not client_id or not username:
             return Response({'success': False, 'detail': 'client_id and username are required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         qs = BillingRecord.objects.filter(client_id=client_id, username=username)
 
-        if date_from:
-            qs = qs.filter(created_at__date__gte=date_from)
-        if date_to:
-            qs = qs.filter(created_at__date__lte=date_to)
+        if session_id:
+            # ── Primary path: exact session-based filter (works across midnight) ──
+            qs = qs.filter(sale_session_id=session_id)
+        else:
+            # ── Legacy fallback: calendar date range ──────────────────────────────
+            if date_from:
+                qs = qs.filter(created_at__date__gte=date_from)
+            if date_to:
+                qs = qs.filter(created_at__date__lte=date_to)
 
         qs = qs.order_by('-created_at')
 
         serializer = BillingRecordSerializer(qs, many=True)
-        return Response({'success': True, 'billings': serializer.data, 'count': qs.count()})
+
+        # Per-payment-method aggregates for the sale modal
+        payment_totals = {}
+        for method in ('cash', 'upi', 'card'):
+            method_agg = qs.filter(payment_method=method).aggregate(
+                bills=Count('billing_id'),
+                total=Sum('total_amount'),
+            )
+            payment_totals[method] = {
+                'bills': method_agg['bills'] or 0,
+                'total': float(method_agg['total'] or 0),
+            }
+
+        return Response({
+            'success': True,
+            'billings': serializer.data,
+            'count': qs.count(),
+            'payment_totals': payment_totals,
+        })
     except Exception as e:
         return Response({'success': False, 'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -1754,3 +1787,74 @@ def get_order_stats(request):
             'total_revenue':    orders.filter(status='completed').aggregate(Sum('total_amount'))['total_amount__sum'] or 0,
         }
     })
+
+# ═════════════════════════════════════════════════════════════
+# SALE SESSION
+# ═════════════════════════════════════════════════════════════
+from django.utils import timezone
+
+
+@api_view(['GET'])
+def get_current_sale_session(request):
+    """Return the active sale session for the given client, if any."""
+    client_id = request.query_params.get('client_id', '').strip()
+    username  = request.query_params.get('username', '').strip()
+    if not client_id:
+        return Response({'success': False, 'detail': 'client_id required.'}, status=400)
+    session = SaleSession.objects.filter(
+        client_id=client_id, status='active'
+    ).order_by('-started_at').first()
+    return Response({
+        'success': True,
+        'sale_session': SaleSessionSerializer(session).data if session else None,
+    })
+
+
+@api_view(['POST'])
+def start_sale_session(request):
+    """Start a new sale session (or return existing active one)."""
+    client_id = request.data.get('client_id', '').strip()
+    username  = request.data.get('username', '').strip()
+    if not client_id:
+        return Response({'success': False, 'detail': 'client_id required.'}, status=400)
+    # Re-use existing active session if present
+    existing = SaleSession.objects.filter(client_id=client_id, status='active').order_by('-started_at').first()
+    if existing:
+        return Response({'success': True, 'sale_session': SaleSessionSerializer(existing).data})
+    session = SaleSession.objects.create(client_id=client_id, username=username, status='active')
+    return Response({'success': True, 'sale_session': SaleSessionSerializer(session).data}, status=201)
+
+
+@api_view(['PATCH'])
+def end_sale_session(request, session_id):
+    """End the active sale session and snapshot billing totals from linked bills."""
+    try:
+        session = SaleSession.objects.get(id=session_id, status='active')
+    except SaleSession.DoesNotExist:
+        return Response({'success': False, 'detail': 'Active sale session not found.'}, status=404)
+
+    # ── Aggregate directly from bills stamped to this session (not by date) ───
+    # This correctly handles sessions that span midnight (e.g. 2 PM → 2 AM).
+    qs = BillingRecord.objects.filter(sale_session=session)
+    agg = qs.aggregate(
+        total_bills=Count('billing_id'),
+        total_revenue=Sum('total_amount'),
+        total_tax=Sum('tax_amount'),
+    )
+    session.total_bills   = agg['total_bills']   or 0
+    session.total_revenue = agg['total_revenue'] or 0
+    session.total_tax     = agg['total_tax']     or 0
+
+    # Per-payment-method aggregation
+    for method in ('cash', 'upi', 'card'):
+        method_agg = qs.filter(payment_method=method).aggregate(
+            bills=Count('billing_id'),
+            total=Sum('total_amount'),
+        )
+        setattr(session, f'{method}_bills', method_agg['bills'] or 0)
+        setattr(session, f'{method}_total', method_agg['total'] or 0)
+
+    session.status   = 'ended'
+    session.ended_at = timezone.now()
+    session.save()
+    return Response({'success': True, 'sale_session': SaleSessionSerializer(session).data})

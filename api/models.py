@@ -9,6 +9,8 @@
 # UPDATED: Added tv_theme field to Customization for TV layout selection
 # UPDATED: Added table_type ('sharing' | 'sitting') and occupied_seats to Table model
 #          occupied_seats is auto-managed by create_order / update_order_status / cancel_order
+# UPDATED: BillingRecord now has a sale_session FK — bills are stamped to the active session
+#          when saved, enabling true session-based reporting (not date-based).
 
 from django.db import models
 from django.db.models import Sum
@@ -516,6 +518,19 @@ class BillingRecord(models.Model):
     subtotal     = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     tax_amount   = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    PAYMENT_CHOICES = [('cash', 'Cash'), ('upi', 'UPI'), ('card', 'Card')]
+    payment_method = models.CharField(
+        max_length=20, choices=PAYMENT_CHOICES, default='cash', blank=True
+    )
+    # ── Links this bill to the sale session that was active when it was saved ──
+    # NULL = legacy bill saved before sale sessions were introduced
+    sale_session = models.ForeignKey(
+        'SaleSession',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='billing_records',
+        help_text='The sale session this bill belongs to. Set automatically on save_billing.'
+    )
     created_at   = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -524,3 +539,36 @@ class BillingRecord(models.Model):
 
     def __str__(self):
         return f"Billing {self.billing_id} — Order {self.order_id} ({self.total_amount})"
+
+
+# ─────────────────────────────────────────────────────────────
+# SaleSession model — tracks a day's sale session per client
+# ─────────────────────────────────────────────────────────────
+class SaleSession(models.Model):
+    STATUS_CHOICES = [('active', 'Active'), ('ended', 'Ended')]
+
+    client_id  = models.CharField(max_length=100, db_index=True)
+    username   = models.CharField(max_length=100, db_index=True)
+    status     = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    started_at = models.DateTimeField(auto_now_add=True)
+    ended_at   = models.DateTimeField(blank=True, null=True)
+
+    # Snapshot totals — populated when session is ended
+    total_bills   = models.IntegerField(default=0)
+    total_revenue = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_tax     = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    # Per-payment-method totals
+    cash_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    upi_total  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    card_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    cash_bills = models.IntegerField(default=0)
+    upi_bills  = models.IntegerField(default=0)
+    card_bills = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = 'sale_sessions'
+        ordering = ['-started_at']
+
+    def __str__(self):
+        return f"SaleSession {self.id} [{self.client_id}] {self.status} — {self.started_at.date()}"

@@ -14,6 +14,7 @@ from .models import MenuItem, Category, Tax, AppUser, CompanyInfo
 from .models import Customization, Banner, TVBanner, Table, Order, OrderItem
 from .models import MealType, Kitchen
 from .models import BillingRecord
+from .models import SaleSession
 
 
 def _build_url(request, url):
@@ -451,9 +452,15 @@ class BillingRecordSerializer(serializers.ModelSerializer):
         model = BillingRecord
         fields = [
             'billing_id', 'client_id', 'username', 'order_id', 'customer_name',
-            'table_number', 'table_name', 'items', 'subtotal', 'tax_amount', 'total_amount', 'created_at'
+            'table_number', 'table_name', 'items', 'subtotal', 'tax_amount',
+            'total_amount', 'payment_method',
+            'sale_session',   # FK — stamped automatically by save_billing view
+            'created_at',
         ]
         read_only_fields = ['created_at']
+        extra_kwargs = {
+            'sale_session': {'required': False, 'allow_null': True},
+        }
 
     def get_banner_url(self, obj):
         if obj.banner:
@@ -582,3 +589,14 @@ class OrderCreateSerializer(serializers.Serializer):
                 tax          = item_data.get('tax', 0),
             )
         return order
+
+class SaleSessionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = SaleSession
+        fields = [
+            'id', 'client_id', 'username', 'status',
+            'started_at', 'ended_at',
+            'total_bills', 'total_revenue', 'total_tax',
+            'cash_total', 'upi_total', 'card_total',
+            'cash_bills', 'upi_bills', 'card_bills',
+        ]
