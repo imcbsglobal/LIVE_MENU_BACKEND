@@ -426,18 +426,23 @@ class Order(models.Model):
     ]
 
     # ── Order origin ──────────────────────────────────────────────────────────
-    # 'self'  = customer scanned QR code and placed the order themselves
-    # 'staff' = staff placed the order directly from the Table Status panel
+    # 'self'     = customer scanned QR code and placed the order themselves
+    # 'staff'    = staff placed the order directly from the Table Status panel
+    # 'delivery' = delivery order placed by staff
+    # 'takeaway' = takeaway order placed by staff
     ORDER_TYPE_CHOICES = [
-        ('self',  'Self Order (QR)'),
-        ('staff', 'Staff Order'),
+        ('self',     'Self Order (QR)'),
+        ('staff',    'Staff Order'),
+        ('delivery', 'Delivery'),
+        ('takeaway', 'Takeaway'),
     ]
     order_type = models.CharField(
         max_length=10, choices=ORDER_TYPE_CHOICES, default='self',
         db_index=True,
         help_text=(
             '"self" = customer QR order that requires waiter acceptance; '
-            '"staff" = direct staff order with instant billing.'
+            '"staff" = direct staff order with instant billing; '
+            '"delivery" = delivery order; "takeaway" = takeaway order.'
         ),
     )
 
@@ -521,6 +526,15 @@ class BillingRecord(models.Model):
     PAYMENT_CHOICES = [('cash', 'Cash'), ('upi', 'UPI'), ('card', 'Card')]
     payment_method = models.CharField(
         max_length=20, choices=PAYMENT_CHOICES, default='cash', blank=True
+    )
+    ORDER_TYPE_CHOICES = [
+        ('dine_in',  'Dine In'),
+        ('delivery', 'Delivery'),
+        ('takeaway', 'Takeaway'),
+    ]
+    order_type = models.CharField(
+        max_length=10, choices=ORDER_TYPE_CHOICES, default='dine_in', blank=True,
+        help_text='"dine_in" = table order, "delivery" = delivery order, "takeaway" = takeaway order.'
     )
     # ── Links this bill to the sale session that was active when it was saved ──
     # NULL = legacy bill saved before sale sessions were introduced

@@ -47,6 +47,7 @@ from .views import (
     get_public_menu,
     save_billing,
     get_billings,
+    health,
 )
 
 # ── Sale Session ──────────────────────────────────────────────────────────────
@@ -143,4 +144,7 @@ urlpatterns = [
 
     # ── Public / Customer Menu (QR scan, no auth) ────────────────────────────
     path('public/menu/', get_public_menu, name='public-menu'),
+
+    # ── Offline connectivity check ────────────────────────────────────────────
+    path('health/', health, name='health'),
 ]

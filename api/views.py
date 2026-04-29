@@ -1858,3 +1858,18 @@ def end_sale_session(request, session_id):
     session.ended_at = timezone.now()
     session.save()
     return Response({'success': True, 'sale_session': SaleSessionSerializer(session).data})
+
+# ═════════════════════════════════════════════════════════════
+# OFFLINE HEALTH CHECK
+# Frontend pings this every 20 s to confirm the backend is
+# reachable before switching from offline → online mode.
+# GET /api/health/   or   HEAD /api/health/
+# ═════════════════════════════════════════════════════════════
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+
+@csrf_exempt
+@require_http_methods(["GET", "HEAD"])
+def health(request):
+    return JsonResponse({"status": "ok"})

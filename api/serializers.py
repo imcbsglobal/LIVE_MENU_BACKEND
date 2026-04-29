@@ -453,13 +453,14 @@ class BillingRecordSerializer(serializers.ModelSerializer):
         fields = [
             'billing_id', 'client_id', 'username', 'order_id', 'customer_name',
             'table_number', 'table_name', 'items', 'subtotal', 'tax_amount',
-            'total_amount', 'payment_method',
+            'total_amount', 'payment_method', 'order_type',
             'sale_session',   # FK — stamped automatically by save_billing view
             'created_at',
         ]
         read_only_fields = ['created_at']
         extra_kwargs = {
             'sale_session': {'required': False, 'allow_null': True},
+            'order_type':   {'required': False},
         }
 
     def get_banner_url(self, obj):
@@ -569,8 +570,8 @@ class OrderCreateSerializer(serializers.Serializer):
     order_time     = serializers.DateTimeField()
     special_instructions = serializers.CharField(required=False, allow_blank=True)
     order_type = serializers.ChoiceField(
-        choices=['self', 'staff'], default='self', required=False,
-        help_text='"self" for QR customer orders, "staff" for direct staff orders.'
+        choices=['self', 'staff', 'delivery', 'takeaway'], default='self', required=False,
+        help_text='"self" for QR customer orders, "staff" for direct staff orders, "delivery"/"takeaway" for off-table orders.'
     )
 
     items = serializers.ListField(child=serializers.DictField(), write_only=True)
