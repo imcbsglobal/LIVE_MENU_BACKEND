@@ -15,6 +15,8 @@ from .models import Customization, Banner, TVBanner, Table, Order, OrderItem
 from .models import MealType, Kitchen
 from .models import BillingRecord
 from .models import SaleSession
+from .models import StockItem, StockLog  
+
 
 
 def _build_url(request, url):
@@ -601,3 +603,46 @@ class SaleSessionSerializer(serializers.ModelSerializer):
             'cash_total', 'upi_total', 'card_total',
             'cash_bills', 'upi_bills', 'card_bills',
         ]
+
+
+
+
+
+# ─────────────────────────────────────────────────────────────
+# Append these two serializers to your serializers.py
+# (after your existing imports and serializer classes)
+# ─────────────────────────────────────────────────────────────
+
+
+class StockItemSerializer(serializers.ModelSerializer):
+    # Read-only convenience fields from the related MenuItem
+    menu_item_name  = serializers.CharField(source='menu_item.name',          read_only=True)
+    category_name   = serializers.CharField(source='menu_item.category.name', read_only=True)
+    menu_item_id    = serializers.IntegerField(source='menu_item.id',         read_only=True)
+    is_low          = serializers.BooleanField(read_only=True)
+    is_out          = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model  = StockItem
+        fields = [
+            'id', 'client_id', 'username',
+            'menu_item', 'menu_item_id', 'menu_item_name', 'category_name',
+            'quantity', 'unit',
+            'is_low', 'is_out',
+            'last_updated', 'created_at',
+        ]
+        read_only_fields = ['id', 'last_updated', 'created_at']
+
+
+class StockLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = StockLog
+        fields = [
+            'id', 'client_id', 'username',
+            'menu_item', 'item_name', 'category_name',
+            'type', 'quantity', 'unit',
+            'prev_qty', 'new_qty',
+            'note', 'date', 'billing_id',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']        

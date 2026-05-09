@@ -8,6 +8,10 @@
 #   - MealTypeViewSet   → ADDED (fixes 404 on /api/meal-types/)
 #   - All existing views unchanged
 
+
+from django.db import transaction
+from django.utils import timezone
+from decimal import Decimal, InvalidOperation
 from rest_framework import viewsets, status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -21,6 +25,7 @@ from .models import (
     MenuItem, Category, Tax, AppUser, CompanyInfo,
     Customization, Banner, TVBanner, Table, Order, OrderItem,
     MealType, Kitchen, BillingRecord, SaleSession,
+    OfflineSyncQueue,
 )
 from .serializers import (
     MenuItemSerializer, CategorySerializer, TaxSerializer,
@@ -1482,9 +1487,11 @@ def get_public_menu(request):
 def save_billing(request):
     try:
         data = request.data.copy()
-        # ── Auto-stamp the currently active sale session for this client ──────
+        # ── Stamp the sale session — frontend explicit ID takes priority ──────
         client_id = (data.get('client_id') or '').strip()
-        if client_id:
+        if data.get('sale_session_id'):
+            data['sale_session'] = data['sale_session_id']
+        elif client_id:
             active_session = SaleSession.objects.filter(
                 client_id=client_id, status='active'
             ).order_by('-started_at').first()
@@ -1513,6 +1520,10 @@ def get_billings(request):
         session_id = request.query_params.get('session_id', '').strip()
         date_from  = request.query_params.get('date_from',  '').strip()
         date_to    = request.query_params.get('date_to',    '').strip()
+        # time_from: full ISO timestamp (e.g. session started_at).
+        # When provided, we filter created_at >= this exact moment so bills
+        # from earlier sessions on the same calendar day are excluded.
+        time_from  = request.query_params.get('time_from',  '').strip()
 
         if not client_id or not username:
             return Response({'success': False, 'detail': 'client_id and username are required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1523,8 +1534,23 @@ def get_billings(request):
             # ── Primary path: exact session-based filter (works across midnight) ──
             qs = qs.filter(sale_session_id=session_id)
         else:
-            # ── Legacy fallback: calendar date range ──────────────────────────────
-            if date_from:
+            # ── Legacy fallback: filter by timestamp range ────────────────────────
+            # Prefer time_from (exact ISO timestamp) over date_from so we never
+            # bleed bills from a previous session that closed earlier the same day.
+            if time_from:
+                try:
+                    from django.utils.dateparse import parse_datetime
+                    from django.utils import timezone as tz
+                    parsed = parse_datetime(time_from)
+                    if parsed is not None:
+                        if parsed.tzinfo is None:
+                            parsed = tz.make_aware(parsed)
+                        qs = qs.filter(created_at__gte=parsed)
+                except Exception:
+                    # Fall back to date-only filter if timestamp is unparseable
+                    if date_from:
+                        qs = qs.filter(created_at__date__gte=date_from)
+            elif date_from:
                 qs = qs.filter(created_at__date__gte=date_from)
             if date_to:
                 qs = qs.filter(created_at__date__lte=date_to)
@@ -1869,7 +1895,427 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+# ═════════════════════════════════════════════════════════════
+# OFFLINE SYNC ENDPOINTS
+# ═════════════════════════════════════════════════════════════
+
+@api_view(['GET'])
+def offline_status(request):
+    """
+    Polled by the React frontend every 15 seconds.
+    Returns connectivity state and pending sync count.
+    GET /api/offline-status/
+    """
+    from api.offline_manager import is_postgres_online
+    online  = is_postgres_online()
+    pending = OfflineSyncQueue.objects.using('local').filter(status='pending').count()
+    synced  = OfflineSyncQueue.objects.using('local').filter(status='synced').count()
+    failed  = OfflineSyncQueue.objects.using('local').filter(status='failed').count()
+    return Response({
+        'online':       online,
+        'pending_sync': pending,
+        'total_synced': synced,
+        'total_failed': failed,
+        'message':      'Online' if (online and pending == 0)
+                        else ('Back online' if online else f'Offline — {pending} items queued'),
+    })
+
+
+@api_view(['POST'])
+def trigger_manual_sync(request):
+    """
+    Manually trigger a sync from the frontend 'Sync Now' button.
+    POST /api/trigger-sync/
+    """
+    from api.offline_manager import sync_pending_writes
+    sync_pending_writes()
+    pending = OfflineSyncQueue.objects.using('local').filter(status='pending').count()
+    return Response({'status': 'sync triggered', 'remaining_pending': pending})
+
+
+
 @csrf_exempt
 @require_http_methods(["GET", "HEAD"])
 def health(request):
     return JsonResponse({"status": "ok"})
+
+
+
+# ═════════════════════════════════════════════════════════════
+# STOCK VIEWS  —  append to your views.py
+# ═════════════════════════════════════════════════════════════
+# Make sure these are added to your existing imports at the top:
+#
+#   from .models import ..., StockItem, StockLog
+#   from .serializers import ..., StockItemSerializer, StockLogSerializer
+#
+# All endpoints require client_id + username (same pattern as
+# the rest of your API — no token auth added here).
+# ═════════════════════════════════════════════════════════════
+
+
+
+# ─────────────────────────────────────────────────────────────
+# GET  /api/stock/                 → list all StockItem rows
+# POST /api/stock/                 → upsert (add / set) stock
+# ─────────────────────────────────────────────────────────────
+@api_view(['GET', 'POST'])
+def stock_list(request):
+    """
+    GET  — Return all tracked stock rows for a client.
+           ?client_id=XX&username=YY
+           Optional filters: ?level=low|out|ok  &  ?category=<name>
+
+    POST — Add stock to (or create) a StockItem.
+           Body: {
+             client_id, username, menu_item_id,
+             quantity,             # amount to ADD (always positive)
+             unit,                 # 'pcs' | 'kg' | …
+             note?,                # optional free-text
+             date?,                # YYYY-MM-DD, defaults to today
+           }
+           Returns the updated StockItem + the new StockLog entry.
+    """
+    if request.method == 'GET':
+        client_id = request.query_params.get('client_id', '').strip()
+        username  = request.query_params.get('username',  '').strip()
+        if not client_id or not username:
+            return Response(
+                {'success': False, 'message': 'client_id and username are required.'},
+                status=400,
+            )
+
+        qs = (
+            StockItem.objects
+            .filter(client_id=client_id, username=username)
+            .select_related('menu_item', 'menu_item__category')
+        )
+
+        # Optional: filter by stock level
+        level = request.query_params.get('level', '').strip()
+        if level == 'out':
+            qs = qs.filter(quantity__lte=0)
+        elif level == 'low':
+            qs = qs.filter(quantity__gt=0, quantity__lte=10)
+        elif level == 'ok':
+            qs = qs.filter(quantity__gt=10)
+
+        # Optional: filter by category name
+        category = request.query_params.get('category', '').strip()
+        if category:
+            qs = qs.filter(menu_item__category__name__iexact=category)
+
+        data = StockItemSerializer(qs, many=True).data
+        return Response({'success': True, 'stock': data, 'count': len(data)})
+
+    # ── POST: add stock ──────────────────────────────────────────────────────
+    client_id    = request.data.get('client_id',  '').strip()
+    username     = request.data.get('username',   '').strip()
+    menu_item_id = request.data.get('menu_item_id')
+    quantity_raw = request.data.get('quantity')
+    unit         = request.data.get('unit', 'pcs').strip()
+    note         = request.data.get('note', '').strip()
+    date_str     = request.data.get('date', '') or str(timezone.localdate())
+
+    # Validate required fields
+    if not client_id or not username:
+        return Response(
+            {'success': False, 'message': 'client_id and username are required.'},
+            status=400,
+        )
+    if not menu_item_id:
+        return Response({'success': False, 'message': 'menu_item_id is required.'}, status=400)
+
+    try:
+        add_qty = Decimal(str(quantity_raw))
+        if add_qty <= 0:
+            raise ValueError
+    except (TypeError, ValueError, InvalidOperation):
+        return Response(
+            {'success': False, 'message': 'quantity must be a positive number.'},
+            status=400,
+        )
+
+    try:
+        menu_item = MenuItem.objects.get(id=menu_item_id, client_id=client_id)
+    except MenuItem.DoesNotExist:
+        return Response({'success': False, 'message': 'Menu item not found.'}, status=404)
+
+    with transaction.atomic():
+        stock_item, _ = StockItem.objects.select_for_update().get_or_create(
+            client_id=client_id,
+            menu_item=menu_item,
+            defaults={'username': username, 'unit': unit, 'quantity': Decimal('0')},
+        )
+        prev_qty = stock_item.quantity
+        stock_item.quantity += add_qty
+        stock_item.unit      = unit      # update unit if changed
+        stock_item.save()
+
+        log_entry = StockLog.objects.create(
+            client_id     = client_id,
+            username      = username,
+            menu_item     = menu_item,
+            item_name     = menu_item.name,
+            category_name = menu_item.category.name if menu_item.category_id else '',
+            type          = 'add',
+            quantity      = add_qty,
+            unit          = unit,
+            prev_qty      = prev_qty,
+            new_qty       = stock_item.quantity,
+            note          = note,
+            date          = date_str,
+        )
+
+    return Response({
+        'success':    True,
+        'stock_item': StockItemSerializer(stock_item).data,
+        'log_entry':  StockLogSerializer(log_entry).data,
+    }, status=201)
+
+
+# ─────────────────────────────────────────────────────────────
+# PUT/PATCH  /api/stock/<id>/adjust/   → set an exact quantity
+# DELETE     /api/stock/<id>/          → stop tracking an item
+# ─────────────────────────────────────────────────────────────
+@api_view(['PUT', 'PATCH'])
+def stock_adjust(request, stock_id):
+    """
+    Manually set the quantity for a tracked stock item (adjust).
+    Body: { quantity, unit?, note? }
+    """
+    try:
+        stock_item = StockItem.objects.select_related(
+            'menu_item', 'menu_item__category'
+        ).get(id=stock_id)
+    except StockItem.DoesNotExist:
+        return Response({'success': False, 'message': 'Stock item not found.'}, status=404)
+
+    quantity_raw = request.data.get('quantity')
+    unit         = request.data.get('unit', stock_item.unit).strip()
+    note         = request.data.get('note', 'Manual adjustment').strip()
+    date_str     = request.data.get('date', '') or str(timezone.localdate())
+
+    try:
+        new_qty = Decimal(str(quantity_raw))
+        if new_qty < 0:
+            raise ValueError
+    except (TypeError, ValueError, InvalidOperation):
+        return Response(
+            {'success': False, 'message': 'quantity must be a non-negative number.'},
+            status=400,
+        )
+
+    with transaction.atomic():
+        prev_qty           = stock_item.quantity
+        stock_item.quantity = new_qty
+        stock_item.unit     = unit
+        stock_item.save()
+
+        log_entry = StockLog.objects.create(
+            client_id     = stock_item.client_id,
+            username      = stock_item.username,
+            menu_item     = stock_item.menu_item,
+            item_name     = stock_item.menu_item.name,
+            category_name = (
+                stock_item.menu_item.category.name
+                if stock_item.menu_item.category_id else ''
+            ),
+            type     = 'adjust',
+            quantity = abs(new_qty - prev_qty),
+            unit     = unit,
+            prev_qty = prev_qty,
+            new_qty  = new_qty,
+            note     = note,
+            date     = date_str,
+        )
+
+    return Response({
+        'success':    True,
+        'stock_item': StockItemSerializer(stock_item).data,
+        'log_entry':  StockLogSerializer(log_entry).data,
+    })
+
+
+@api_view(['DELETE'])
+def stock_delete(request, stock_id):
+    """Remove a StockItem row (stop tracking that menu item)."""
+    try:
+        StockItem.objects.get(id=stock_id).delete()
+        return Response({'success': True})
+    except StockItem.DoesNotExist:
+        return Response({'success': False, 'message': 'Stock item not found.'}, status=404)
+
+
+# ─────────────────────────────────────────────────────────────
+# POST  /api/stock/deduct/   → deduct sold items after billing
+# ─────────────────────────────────────────────────────────────
+@api_view(['POST'])
+def stock_deduct(request):
+    """
+    Called automatically when a bill is saved (replaces the
+    localStorage-only `deductStockOnBilling` helper in stockManager.js).
+
+    Body: {
+      client_id,
+      username,
+      billing_id,           # bill reference for the log
+      items: [
+        { menu_item_id, name, quantity, unit? },
+        …
+      ]
+    }
+
+    Returns a summary of what was deducted and what was skipped
+    (items not tracked in stock are silently skipped — same
+    behaviour as the JS helper).
+    """
+    client_id  = request.data.get('client_id', '').strip()
+    username   = request.data.get('username',  '').strip()
+    billing_id = request.data.get('billing_id', '').strip()
+    items      = request.data.get('items', [])
+
+    if not client_id or not username:
+        return Response(
+            {'success': False, 'message': 'client_id and username are required.'},
+            status=400,
+        )
+    if not isinstance(items, list) or not items:
+        return Response({'success': False, 'message': 'items array is required.'}, status=400)
+
+    today_str = str(timezone.localdate())
+    deducted  = []
+    skipped   = []
+
+    with transaction.atomic():
+        for item in items:
+            menu_item_id = item.get('menu_item_id') or item.get('id')
+            if not menu_item_id:
+                skipped.append({'reason': 'no menu_item_id', 'item': item})
+                continue
+
+            try:
+                deduct_qty = Decimal(str(item.get('quantity', 1)))
+                if deduct_qty <= 0:
+                    raise ValueError
+            except (TypeError, ValueError, InvalidOperation):
+                skipped.append({'reason': 'invalid quantity', 'item': item})
+                continue
+
+            try:
+                stock_item = StockItem.objects.select_for_update().get(
+                    client_id=client_id,
+                    menu_item_id=menu_item_id,
+                )
+            except StockItem.DoesNotExist:
+                # Not tracked — skip silently (same as JS helper)
+                skipped.append({'menu_item_id': menu_item_id, 'reason': 'not tracked'})
+                continue
+
+            prev_qty            = stock_item.quantity
+            stock_item.quantity  = max(Decimal('0'), prev_qty - deduct_qty)
+            stock_item.save()
+
+            StockLog.objects.create(
+                client_id     = client_id,
+                username      = username,
+                menu_item_id  = menu_item_id,
+                item_name     = item.get('name', stock_item.menu_item.name),
+                category_name = item.get('category_name', ''),
+                type          = 'deduct',
+                quantity      = deduct_qty,
+                unit          = stock_item.unit,
+                prev_qty      = prev_qty,
+                new_qty       = stock_item.quantity,
+                note          = f'Billed — {billing_id}' if billing_id else 'Billing deduction',
+                date          = today_str,
+                billing_id    = billing_id,
+            )
+
+            deducted.append({
+                'menu_item_id': menu_item_id,
+                'prev_qty':     float(prev_qty),
+                'new_qty':      float(stock_item.quantity),
+            })
+
+    return Response({
+        'success':  True,
+        'deducted': len(deducted),
+        'skipped':  len(skipped),
+        'details':  {'deducted': deducted, 'skipped': skipped},
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# GET  /api/stock/log/   → paginated activity log
+# ─────────────────────────────────────────────────────────────
+@api_view(['GET'])
+def stock_log(request):
+    """
+    Return the stock activity log for a client.
+
+    Query params:
+      client_id   (required)
+      username    (required)
+      type        — filter by movement type: add | deduct | adjust
+      menu_item   — filter by menu_item_id
+      limit       — max rows (default 200, max 500)
+    """
+    client_id = request.query_params.get('client_id', '').strip()
+    username  = request.query_params.get('username',  '').strip()
+    if not client_id or not username:
+        return Response(
+            {'success': False, 'message': 'client_id and username are required.'},
+            status=400,
+        )
+
+    qs = StockLog.objects.filter(client_id=client_id, username=username)
+
+    log_type = request.query_params.get('type', '').strip()
+    if log_type in ('add', 'deduct', 'adjust'):
+        qs = qs.filter(type=log_type)
+
+    menu_item_id = request.query_params.get('menu_item', '').strip()
+    if menu_item_id:
+        qs = qs.filter(menu_item_id=menu_item_id)
+
+    try:
+        limit = min(int(request.query_params.get('limit', 200)), 500)
+    except (ValueError, TypeError):
+        limit = 200
+
+    qs   = qs[:limit]
+    data = StockLogSerializer(qs, many=True).data
+    return Response({'success': True, 'log': data, 'count': len(data)})
+
+
+# ─────────────────────────────────────────────────────────────
+# GET  /api/stock/stats/   → summary statistics
+# ─────────────────────────────────────────────────────────────
+@api_view(['GET'])
+def stock_stats(request):
+    """
+    Quick summary: total tracked, low, out-of-stock counts.
+    ?client_id=XX&username=YY
+    """
+    client_id = request.query_params.get('client_id', '').strip()
+    username  = request.query_params.get('username',  '').strip()
+    if not client_id or not username:
+        return Response(
+            {'success': False, 'message': 'client_id and username are required.'},
+            status=400,
+        )
+
+    qs      = StockItem.objects.filter(client_id=client_id, username=username)
+    total   = qs.count()
+    out     = qs.filter(quantity__lte=0).count()
+    low     = qs.filter(quantity__gt=0, quantity__lte=10).count()
+    in_stock = total - out - low
+
+    return Response({
+        'success':  True,
+        'total_tracked': total,
+        'in_stock':      in_stock,
+        'low_stock':     low,
+        'out_of_stock':  out,
+    })

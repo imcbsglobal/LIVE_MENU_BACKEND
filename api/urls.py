@@ -3,7 +3,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     MenuItemViewSet, CategoryViewSet, TaxViewSet,
-    MealTypeViewSet,  # ← ADDED
+    MealTypeViewSet,
 
     # Auth
     user_login, staff_login, verify_secret_code,
@@ -38,7 +38,7 @@ from .views import (
     # Tables
     get_tables, create_table, update_table, delete_table,
 
-    # Kitchens  ← NEW
+    # Kitchens
     get_kitchens, create_kitchen, update_kitchen, delete_kitchen,
 
     # Orders
@@ -48,6 +48,11 @@ from .views import (
     save_billing,
     get_billings,
     health,
+    offline_status, trigger_manual_sync,
+
+    # Stock
+    stock_list, stock_adjust, stock_delete,
+    stock_deduct, stock_log, stock_stats,
 )
 
 # ── Sale Session ──────────────────────────────────────────────────────────────
@@ -57,7 +62,7 @@ router = DefaultRouter()
 router.register(r'categories', CategoryViewSet, basename='category')
 router.register(r'taxes',      TaxViewSet,      basename='tax')
 router.register(r'menu-items', MenuItemViewSet, basename='menuitem')
-router.register(r'meal-types', MealTypeViewSet, basename='mealtype')  # ← ADDED
+router.register(r'meal-types', MealTypeViewSet, basename='mealtype')
 
 urlpatterns = [
     path('', include(router.urls)),
@@ -119,11 +124,11 @@ urlpatterns = [
     path('tables/<int:table_id>/',        delete_table, name='delete-table'),
     path('tables/<int:table_id>/update/', update_table, name='update-table'),
 
-    # ── Kitchens ─────────────────────────────────────────────  ← NEW
-    path('kitchens/',                           get_kitchens,   name='get-kitchens'),
-    path('kitchens/create/',                    create_kitchen, name='create-kitchen'),
-    path('kitchens/<int:kitchen_id>/',          delete_kitchen, name='delete-kitchen'),
-    path('kitchens/<int:kitchen_id>/update/',   update_kitchen, name='update-kitchen'),
+    # ── Kitchens ─────────────────────────────────────────────
+    path('kitchens/',                         get_kitchens,   name='get-kitchens'),
+    path('kitchens/create/',                  create_kitchen, name='create-kitchen'),
+    path('kitchens/<int:kitchen_id>/',        delete_kitchen, name='delete-kitchen'),
+    path('kitchens/<int:kitchen_id>/update/', update_kitchen, name='update-kitchen'),
 
     # ── Orders ───────────────────────────────────────────────
     path('orders/',                       create_order,        name='create-order'),
@@ -134,17 +139,29 @@ urlpatterns = [
     path('orders/<int:order_id>/status/', update_order_status, name='update-order-status'),
     path('orders/<int:order_id>/cancel/', cancel_order,        name='cancel-order'),
     path('orders/<int:order_id>/accept/', accept_order,        name='accept-order'),
-    path('billings/save/',               save_billing,          name='save-billing'),
-    path('billings/',                    get_billings,          name='get-billings'),
+    path('billings/save/',                save_billing,        name='save-billing'),
+    path('billings/',                     get_billings,        name='get-billings'),
 
     # ── Sale Session ──────────────────────────────────────────────────────────
-    path('sale-session/current/',            get_current_sale_session, name='sale-session-current'),
-    path('sale-session/start/',              start_sale_session,       name='sale-session-start'),
-    path('sale-session/<int:session_id>/end/', end_sale_session,       name='sale-session-end'),
+    path('sale-session/current/',              get_current_sale_session, name='sale-session-current'),
+    path('sale-session/start/',                start_sale_session,       name='sale-session-start'),
+    path('sale-session/<int:session_id>/end/', end_sale_session,         name='sale-session-end'),
 
     # ── Public / Customer Menu (QR scan, no auth) ────────────────────────────
     path('public/menu/', get_public_menu, name='public-menu'),
 
     # ── Offline connectivity check ────────────────────────────────────────────
     path('health/', health, name='health'),
+
+    # ── Offline Sync ─────────────────────────────────────────────────────────
+    path('offline-status/',  offline_status,       name='offline-status'),
+    path('trigger-sync/',    trigger_manual_sync,  name='trigger-sync'),
+
+    # ── Stock ─────────────────────────────────────────────────────────────────
+    path('stock/',                         stock_list,    name='stock-list'),
+    path('stock/deduct/',                  stock_deduct,  name='stock-deduct'),
+    path('stock/log/',                     stock_log,     name='stock-log'),
+    path('stock/stats/',                   stock_stats,   name='stock-stats'),
+    path('stock/<int:stock_id>/adjust/',   stock_adjust,  name='stock-adjust'),
+    path('stock/<int:stock_id>/',          stock_delete,  name='stock-delete'),
 ]

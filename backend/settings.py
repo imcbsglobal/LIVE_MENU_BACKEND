@@ -106,19 +106,42 @@ TEMPLATES = [
 WSGI_APPLICATION = 'backend.wsgi.application'
 
 # ============================================
-# DATABASE - PostgreSQL
+# DATABASE — PostgreSQL (online) + SQLite (offline fallback)
 # ============================================
 DATABASES = {
     'default': {
-        'ENGINE':       'django.db.backends.postgresql',
-        'NAME':         os.getenv('DB_NAME'),
-        'USER':         os.getenv('DB_USER'),
-        'PASSWORD':     os.getenv('DB_PASSWORD'),
-        'HOST':         os.getenv('DB_HOST'),
-        'PORT':         os.getenv('DB_PORT'),
+        'ENGINE':   'django.db.backends.postgresql',
+        'NAME':     os.getenv('DB_NAME'),
+        'USER':     os.getenv('DB_USER'),
+        'PASSWORD': os.getenv('DB_PASSWORD'),
+        'HOST':     os.getenv('DB_HOST', 'localhost'),
+        'PORT':     os.getenv('DB_PORT', '5432'),
+        'OPTIONS':  {'connect_timeout': 5},
         'CONN_MAX_AGE': 60,
-    }
+    },
+    'local': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME':   BASE_DIR / 'offline_cache.sqlite3',
+    },
 }
+
+# Smart database router — switches to SQLite when PostgreSQL is unreachable
+DATABASE_ROUTERS = ['backend.db_router.OfflineRouter']
+
+# Probe PostgreSQL reachability at startup (non-blocking, 3 s timeout)
+import socket as _socket
+def _pg_reachable():
+    try:
+        _s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        _s.settimeout(3)
+        _s.connect((os.getenv('DB_HOST', 'localhost'), int(os.getenv('DB_PORT', 5432))))
+        _s.close()
+        return True
+    except Exception:
+        return False
+
+POSTGRES_ONLINE = _pg_reachable()
+print(f'[settings] PostgreSQL reachable: {POSTGRES_ONLINE}')
 
 # ============================================
 # PASSWORD VALIDATION

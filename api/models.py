@@ -586,3 +586,158 @@ class SaleSession(models.Model):
 
     def __str__(self):
         return f"SaleSession {self.id} [{self.client_id}] {self.status} — {self.started_at.date()}"
+    
+
+    # ─────────────────────────────────────────────────────────────
+# STOCK MODELS
+# Append these two classes to the bottom of your models.py
+# ─────────────────────────────────────────────────────────────
+
+class StockItem(models.Model):
+    """
+    Current stock level for a single menu item per restaurant.
+    One row per (client_id, menu_item_id) pair.
+    Updated in-place on every add / adjust / deduct.
+    """
+    UNIT_CHOICES = [
+        ('pcs',   'Pieces'),
+        ('kg',    'Kilograms'),
+        ('g',     'Grams'),
+        ('L',     'Litres'),
+        ('mL',    'Millilitres'),
+        ('plate', 'Plate'),
+        ('bowl',  'Bowl'),
+        ('dozen', 'Dozen'),
+        ('box',   'Box'),
+        ('pack',  'Pack'),
+    ]
+
+    client_id    = models.CharField(max_length=100, db_index=True)
+    username     = models.CharField(max_length=100, db_index=True)
+    menu_item    = models.ForeignKey(
+        MenuItem,
+        on_delete=models.CASCADE,
+        related_name='stock_item',
+        help_text='The menu item this stock row tracks.',
+    )
+    quantity     = models.DecimalField(
+        max_digits=10, decimal_places=2, default=0,
+        help_text='Current remaining quantity.',
+    )
+    unit         = models.CharField(max_length=10, choices=UNIT_CHOICES, default='pcs')
+    last_updated = models.DateTimeField(auto_now=True)
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table        = 'stock_items'
+        unique_together = ['client_id', 'menu_item']
+        ordering        = ['menu_item__category__name', 'menu_item__name']
+        indexes         = [models.Index(fields=['client_id', 'username'])]
+        verbose_name        = 'Stock Item'
+        verbose_name_plural = 'Stock Items'
+
+    def __str__(self):
+        return f"Stock[{self.client_id}] {self.menu_item.name} — {self.quantity} {self.unit}"
+
+    # ── Convenience helpers ──────────────────────────────────────────────────
+    @property
+    def is_low(self):
+        return 0 < float(self.quantity) <= 10
+
+    @property
+    def is_out(self):
+        return float(self.quantity) <= 0
+
+
+class StockLog(models.Model):
+    """
+    Immutable audit trail of every stock movement.
+    type: 'add' | 'deduct' | 'adjust'
+    """
+    TYPE_CHOICES = [
+        ('add',    'Add'),
+        ('deduct', 'Deduct'),
+        ('adjust', 'Adjust'),
+    ]
+
+    client_id  = models.CharField(max_length=100, db_index=True)
+    username   = models.CharField(max_length=100, db_index=True)
+    menu_item  = models.ForeignKey(
+        MenuItem,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='stock_logs',
+    )
+    # Denormalised name so the log is readable even if the item is deleted
+    item_name     = models.CharField(max_length=200, blank=True)
+    category_name = models.CharField(max_length=200, blank=True)
+
+    type      = models.CharField(max_length=10, choices=TYPE_CHOICES, default='add')
+    quantity  = models.DecimalField(max_digits=10, decimal_places=2)
+    unit      = models.CharField(max_length=10, default='pcs')
+    prev_qty  = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    new_qty   = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    note       = models.CharField(max_length=500, blank=True)
+    date       = models.DateField(help_text='Business date of the movement (supplied by client).')
+    billing_id = models.CharField(
+        max_length=100, blank=True,
+        help_text='Billing reference if this was a billing-triggered deduction.',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'stock_logs'
+        ordering = ['-created_at']
+        indexes  = [
+            models.Index(fields=['client_id', 'username', '-created_at']),
+            models.Index(fields=['client_id', 'type']),
+        ]
+        verbose_name        = 'Stock Log'
+        verbose_name_plural = 'Stock Logs'
+
+    def __str__(self):
+        return f"[{self.type.upper()}] {self.item_name} {self.quantity}{self.unit} ({self.client_id})"
+
+# ─────────────────────────────────────────────────────────────
+# OFFLINE SYNC QUEUE
+# Every write that happens while PostgreSQL is unreachable is
+# stored here in SQLite.  A background scheduler replays them
+# against PostgreSQL once the connection is restored.
+# ─────────────────────────────────────────────────────────────
+class OfflineSyncQueue(models.Model):
+    STATUS_PENDING = 'pending'
+    STATUS_SYNCED  = 'synced'
+    STATUS_FAILED  = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_SYNCED,  'Synced'),
+        (STATUS_FAILED,  'Failed'),
+    ]
+    METHOD_CHOICES = [
+        ('POST',   'POST'),
+        ('PUT',    'PUT'),
+        ('PATCH',  'PATCH'),
+        ('DELETE', 'DELETE'),
+    ]
+
+    endpoint   = models.CharField(max_length=500,
+                     help_text='API path, e.g. /api/orders/')
+    method     = models.CharField(max_length=10, choices=METHOD_CHOICES)
+    payload    = models.JSONField(default=dict,
+                     help_text='JSON body of the original request')
+    status     = models.CharField(max_length=10, choices=STATUS_CHOICES,
+                     default=STATUS_PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    synced_at  = models.DateTimeField(null=True, blank=True)
+    error_msg  = models.TextField(blank=True)
+    retries    = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = 'offline_sync_queue'
+        ordering = ['created_at']
+        verbose_name        = 'Offline Sync Queue'
+        verbose_name_plural = 'Offline Sync Queue'
+
+    def __str__(self):
+        return f'[{self.status}] {self.method} {self.endpoint} (retry={self.retries})'
