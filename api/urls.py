@@ -44,6 +44,7 @@ from .views import (
     # Orders
     create_order, get_orders, get_order_detail,
     update_order_status, cancel_order, get_order_stats, accept_order,
+    get_table_bill,
     get_public_menu,
     save_billing,
     get_billings,
@@ -131,6 +132,7 @@ urlpatterns = [
     path('kitchens/<int:kitchen_id>/update/', update_kitchen, name='update-kitchen'),
 
     # ── Orders ───────────────────────────────────────────────
+    path('orders/table-bill/',            get_table_bill,      name='table-bill'),
     path('orders/',                       create_order,        name='create-order'),
     path('orders/create/',                create_order,        name='create-order-alt'),
     path('orders/list/',                  get_orders,          name='get-orders'),

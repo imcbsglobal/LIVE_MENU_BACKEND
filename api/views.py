@@ -1793,6 +1793,110 @@ def cancel_order(request, order_id):
         return Response({'success': False, 'message': 'Order not found.'}, status=404)
 
 
+# ─────────────────────────────────────────────────────────────
+# GET  /api/orders/table-bill/
+# Consolidates all active (non-completed, non-cancelled) orders
+# for a given table into a single bill preview that the billing
+# page can immediately display and save.
+# Query params: client_id, username, table_number
+# ─────────────────────────────────────────────────────────────
+@api_view(['GET'])
+def get_table_bill(request):
+    client_id    = request.query_params.get('client_id', '').strip()
+    username     = request.query_params.get('username', '').strip()
+    table_number = request.query_params.get('table_number', '').strip()
+
+    if not client_id or not username or not table_number:
+        return Response(
+            {'success': False, 'message': 'client_id, username and table_number are required.'},
+            status=400,
+        )
+
+    # All non-terminal orders for this table
+    active_orders = (
+        Order.objects
+        .filter(
+            client_id=client_id,
+            username=username,
+            table_number=table_number,
+        )
+        .exclude(status__in=['completed', 'cancelled'])
+        .prefetch_related('order_items')
+        .order_by('created_at')
+    )
+
+    if not active_orders.exists():
+        return Response({'success': False, 'message': 'No active orders found for this table.'}, status=404)
+
+    # Collect table metadata (name) — best-effort
+    table_name = ''
+    try:
+        tbl = Table.objects.get(client_id=client_id, username=username, table_number=table_number, status='active')
+        table_name = tbl.table_name or ''
+    except Table.DoesNotExist:
+        pass
+
+    # Merge all order items into a flat list for billing
+    # If the same menu item / portion appears in multiple orders, merge quantities.
+    merged: dict = {}  # key = (name, portion) → item dict
+    order_ids    = []
+    customer_names = []
+
+    for order in active_orders:
+        order_ids.append(order.id)
+        if order.customer_name and order.customer_name not in customer_names:
+            customer_names.append(order.customer_name)
+        for oi in order.order_items.all():
+            key = (oi.name, oi.portion)
+            if key in merged:
+                merged[key]['quantity'] += oi.quantity
+            else:
+                merged[key] = {
+                    'name':     oi.name,
+                    'portion':  oi.portion,
+                    'quantity': oi.quantity,
+                    'price':    float(oi.price),
+                    'tax_pct':  float(oi.tax),
+                }
+
+    items = list(merged.values())
+
+    # Recompute totals from merged items
+    subtotal = sum(it['price'] * it['quantity'] for it in items)
+    tax_amount = sum(
+        it['price'] * it['quantity'] * it['tax_pct'] / 100
+        for it in items
+    )
+    tax_amount   = round(tax_amount,  2)
+    total_amount = round(subtotal + tax_amount, 2)
+
+    # Build the customer display name — join all unique names if multiple orders
+    customer_name = ', '.join(customer_names) if customer_names else 'Guest'
+
+    # Active sale session — stamp it so billing records end up in the right session
+    active_session = SaleSession.objects.filter(
+        client_id=client_id, status='active'
+    ).order_by('-started_at').first()
+
+    return Response({
+        'success': True,
+        'bill_preview': {
+            'order_ids':       order_ids,         # list of order IDs that will be completed
+            'order_id':        order_ids[0] if len(order_ids) == 1 else None,
+            'customer_name':   customer_name,
+            'table_number':    table_number,
+            'table_name':      table_name,
+            'items':           items,
+            'subtotal':        round(subtotal, 2),
+            'tax_amount':      tax_amount,
+            'total_amount':    total_amount,
+            'order_count':     len(order_ids),
+            'sale_session_id': active_session.id if active_session else None,
+            'order_type':      'dine_in',
+        },
+    })
+
+
 @api_view(['GET'])
 def get_order_stats(request):
     client_id = request.query_params.get('client_id')
