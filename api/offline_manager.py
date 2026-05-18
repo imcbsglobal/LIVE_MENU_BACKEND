@@ -11,6 +11,7 @@ Responsibilities:
 """
 
 import socket
+import time                          # ← ADDED
 import logging
 import threading
 from datetime import datetime, timezone
@@ -20,6 +21,14 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 _lock  = threading.Lock()
 
+# ── ADDED: cache the last TCP probe result for 10 seconds ────────────────────
+# Without this, db_router.py calls is_postgres_online() on EVERY read/write,
+# opening a new socket each time.  A slow or momentarily-busy PostgreSQL can
+# return False for one of those probes, causing that request to be written to
+# SQLite instead of PostgreSQL — silently corrupting the routing.
+_pg_cache: dict = {'online': None, 'checked_at': 0.0}
+_PG_CACHE_TTL   = 10   # seconds — tune up/down as needed
+
 
 # ── 1. Connectivity probe ────────────────────────────────────────────────────
 
@@ -27,7 +36,19 @@ def is_postgres_online() -> bool:
     """
     TCP-level probe to check if PostgreSQL is reachable.
     Does NOT open a Django DB connection (fast, < 3 s timeout).
+    Result is cached for _PG_CACHE_TTL seconds so the router does not
+    open a new socket on every single database operation.
     """
+    # ── ADDED: return cached result if still fresh ────────────────────────
+    now = time.monotonic()
+    with _lock:
+        if (
+            _pg_cache['online'] is not None
+            and (now - _pg_cache['checked_at']) < _PG_CACHE_TTL
+        ):
+            return _pg_cache['online']
+    # ── END ADDED ─────────────────────────────────────────────────────────
+
     try:
         db_cfg = settings.DATABASES['default']
         host   = db_cfg.get('HOST', 'localhost') or 'localhost'
@@ -36,9 +57,17 @@ def is_postgres_online() -> bool:
         s.settimeout(2)
         s.connect((host, port))
         s.close()
-        return True
+        result = True
     except Exception:
-        return False
+        result = False
+
+    # ── ADDED: store result in cache ──────────────────────────────────────
+    with _lock:
+        _pg_cache['online']     = result
+        _pg_cache['checked_at'] = time.monotonic()
+    # ── END ADDED ─────────────────────────────────────────────────────────
+
+    return result
 
 
 # ── 2. Active DB alias ────────────────────────────────────────────────────────

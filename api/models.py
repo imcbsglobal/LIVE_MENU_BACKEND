@@ -531,10 +531,11 @@ class BillingRecord(models.Model):
         ('dine_in',  'Dine In'),
         ('delivery', 'Delivery'),
         ('takeaway', 'Takeaway'),
+        ('staff',    'Staff Order'),
     ]
     order_type = models.CharField(
         max_length=10, choices=ORDER_TYPE_CHOICES, default='dine_in', blank=True,
-        help_text='"dine_in" = table order, "delivery" = delivery order, "takeaway" = takeaway order.'
+        help_text='"dine_in" = table/QR order, "staff" = staff-placed table order, "delivery"/"takeaway" = off-table orders.'
     )
     # ── Links this bill to the sale session that was active when it was saved ──
     # NULL = legacy bill saved before sale sessions were introduced

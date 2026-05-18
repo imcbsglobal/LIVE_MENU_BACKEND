@@ -2,8 +2,10 @@
 api/scheduler.py
 ────────────────
 Background APScheduler that runs every 30 seconds.
-When PostgreSQL comes back online after being unreachable,
-it automatically triggers sync_pending_writes().
+Drains the SQLite sync queue to PostgreSQL whenever:
+  - PostgreSQL just came back online after being unreachable, OR
+  - Items are still sitting in the queue while the server is online
+    (covers records that landed in SQLite due to a brief router blip).
 """
 
 import logging
@@ -17,17 +19,35 @@ def _check_and_sync():
     """Job function — called every 30 s by the scheduler."""
     global _was_online
     from api.offline_manager import is_postgres_online, sync_pending_writes
+    from api.models import OfflineSyncQueue
 
     online = is_postgres_online()
 
-    if online and _was_online is False:
-        # Connection just restored — kick off a sync
-        logger.info('[SCHEDULER] PostgreSQL is BACK ONLINE — auto-syncing...')
-        try:
-            result = sync_pending_writes()
-            logger.info(f'[SCHEDULER] Auto-sync result: {result}')
-        except Exception as exc:
-            logger.error(f'[SCHEDULER] Auto-sync failed: {exc}')
+    if online:
+        # ── CHANGED: sync on reconnect OR whenever pending items exist ──────
+        # Original code only synced on the offline→online transition, so any
+        # records stranded in SQLite while the server was already online
+        # (e.g. from a brief TCP probe failure in the router) were never sent.
+        just_reconnected = (_was_online is False)
+
+        pending_count = (
+            OfflineSyncQueue.objects
+            .using('local')
+            .filter(status=OfflineSyncQueue.STATUS_PENDING)
+            .count()
+        )
+
+        if just_reconnected:
+            logger.info('[SCHEDULER] PostgreSQL is BACK ONLINE — auto-syncing...')
+
+        if pending_count > 0:
+            logger.info(f'[SCHEDULER] {pending_count} pending item(s) found — syncing...')
+            try:
+                result = sync_pending_writes()
+                logger.info(f'[SCHEDULER] Sync result: {result}')
+            except Exception as exc:
+                logger.error(f'[SCHEDULER] Sync failed: {exc}')
+        # ── END CHANGED ──────────────────────────────────────────────────────
 
     if _was_online is None:
         # First run — log initial state

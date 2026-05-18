@@ -25,7 +25,7 @@ from .models import (
     MenuItem, Category, Tax, AppUser, CompanyInfo,
     Customization, Banner, TVBanner, Table, Order, OrderItem,
     MealType, Kitchen, BillingRecord, SaleSession,
-    OfflineSyncQueue,
+    OfflineSyncQueue, StockItem, StockLog,
 )
 from .serializers import (
     MenuItemSerializer, CategorySerializer, TaxSerializer,
@@ -34,6 +34,7 @@ from .serializers import (
     TableSerializer, OrderSerializer, OrderCreateSerializer,
     MealTypeSerializer, KitchenSerializer,
     BillingRecordSerializer, SaleSessionSerializer,
+    StockItemSerializer, StockLogSerializer,
 )
 import requests
 
@@ -1487,6 +1488,7 @@ def get_public_menu(request):
 def save_billing(request):
     try:
         data = request.data.copy()
+
         # ── Stamp the sale session — frontend explicit ID takes priority ──────
         client_id = (data.get('client_id') or '').strip()
         if data.get('sale_session_id'):
@@ -1497,11 +1499,43 @@ def save_billing(request):
             ).order_by('-started_at').first()
             if active_session:
                 data['sale_session'] = active_session.id
+
+        # ── Sanitize order_id ─────────────────────────────────────────────────
+        # Offline orders carry placeholder strings like "OFFLINE-123" or
+        # "STAFF-1234567890" as order_id. BillingRecord.order_id is an
+        # IntegerField — a non-numeric string causes a validation error and
+        # silently drops the entire bill. Null it out; the order itself is
+        # synced separately via the pending-orders queue.
+        raw_order_id = data.get('order_id', '')
+        if raw_order_id is not None:
+            raw_str = str(raw_order_id)
+            if raw_str.startswith('OFFLINE-') or raw_str.startswith('STAFF-'):
+                data['order_id'] = None
+            else:
+                try:
+                    data['order_id'] = int(raw_order_id)
+                except (ValueError, TypeError):
+                    data['order_id'] = None
+
+        # ── Normalize order_type ───────────────────────────────────────────────
+        # The Order model accepts 'staff' but BillingRecord only knows
+        # dine_in / delivery / takeaway. Map 'staff' -> 'dine_in' so table
+        # orders placed via the Order button are always saved correctly and
+        # appear in the closing sale report just like delivery/takeaway orders.
+        raw_type = (data.get('order_type') or '').strip()
+        VALID_BILLING_TYPES = {'dine_in', 'delivery', 'takeaway'}
+        if raw_type not in VALID_BILLING_TYPES:
+            data['order_type'] = 'dine_in'
+
         serializer = BillingRecordSerializer(data=data)
         if serializer.is_valid():
             serializer.save()
             return Response({'success': True, 'billing': serializer.data}, status=status.HTTP_201_CREATED)
-        return Response({'success': False, 'errors': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        # Surface validation errors so they are visible in server logs / network tab
+        return Response(
+            {'success': False, 'errors': serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     except Exception as e:
         return Response({'success': False, 'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
