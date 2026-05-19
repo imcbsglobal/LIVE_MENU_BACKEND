@@ -1352,6 +1352,17 @@ def get_tables(request):
 
 @api_view(['POST'])
 def create_table(request):
+    client_id    = request.data.get('client_id', '').strip()
+    table_number = request.data.get('table_number', '').strip()
+
+    # Prevent duplicate table numbers within the same company
+    if client_id and table_number:
+        if Table.objects.filter(client_id=client_id, table_number=table_number).exists():
+            return Response({
+                'success': False,
+                'errors': {'table_number': [f'Table "{table_number}" already exists.']}
+            }, status=400)
+
     s = TableSerializer(data=request.data)
     if s.is_valid():
         s.save()
