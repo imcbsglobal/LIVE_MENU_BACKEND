@@ -34,6 +34,8 @@ ALLOWED_HOSTS = [
     '127.0.0.1',
     'melone.in',
     'www.melone.in',
+    'demomelone.imcbs.com',
+    'www.demomelone.imcbs.com',
 ]
 
 # Allow all 192.168.1.x IPs in development (any device on the local network)
