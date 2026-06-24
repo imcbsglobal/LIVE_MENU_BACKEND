@@ -319,9 +319,15 @@ def superadmin_login(request):
     if not check_password(password, user.password):
         return Response({'success': False, 'message': 'Incorrect password.'}, status=401)
 
+    # Generate a simple token — username:user_type:id encoded in base64
+    import base64, time
+    raw   = f"{user.username}:{user.user_type}:{user.id}:{int(time.time())}"
+    token = base64.b64encode(raw.encode()).decode()
+
     return Response({
         'success': True,
         'message': 'Super Admin login successful.',
+        'token':   token,
         'user': {
             'id':        user.id,
             'username':  user.username,
