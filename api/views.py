@@ -547,21 +547,32 @@ def get_all_companies(request):
         admin_count = AppUser.objects.filter(company=c, user_type='admin').count()
         staff_count = AppUser.objects.filter(company=c, user_type='user').count()
         data.append({
-            'client_id':         c.client_id,
-            'firm_name':         c.firm_name,
-            'place':             c.place,
-            'is_active':         c.is_active,
-            'allowed_pages':     c.allowed_pages,
-            'package':           c.package or _detect_package(c.allowed_pages),
+            'client_id':          c.client_id,
+            'firm_name':          c.firm_name,
+            'place':              c.place,
+            'address':            c.address,
+            'district':           c.district,
+            'pin_code':           c.pin_code,
+            'phone':              c.phone,
+            'phone2':             c.phone2,
+            'email':              c.email,
+            'gst_number':         c.gst_number,
+            'pan_number':         c.pan_number,
+            'instagram_url':      c.instagram_url,
+            'google_url':         c.google_url,
+            'whatsapp':           c.whatsapp,
+            'is_active':          c.is_active,
+            'allowed_pages':      c.allowed_pages,
+            'package':            c.package or _detect_package(c.allowed_pages),
             'leasing_start_date': str(c.leasing_start_date) if c.leasing_start_date else None,
             'leasing_end_date':   str(c.leasing_end_date)   if c.leasing_end_date   else None,
-            'admin_count':       admin_count,
-            'staff_count':       staff_count,
-            'created_at':        c.created_at.isoformat(),
-            'admin_id':          admin.id       if admin else None,
-            'admin_username':    admin.username if admin else None,
-            'admin_full_name':   admin.full_name if admin else None,
-            'admin_password':    admin.plain_password if admin else None,
+            'admin_count':        admin_count,
+            'staff_count':        staff_count,
+            'created_at':         c.created_at.isoformat(),
+            'admin_id':           admin.id            if admin else None,
+            'admin_username':     admin.username      if admin else None,
+            'admin_full_name':    admin.full_name     if admin else None,
+            'admin_password':     admin.plain_password if admin else None,
         })
     return Response({'success': True, 'companies': data, 'count': len(data)})
 
@@ -720,6 +731,7 @@ def get_users(request):
             'is_active':           u.is_active,
             'allowed_pages':       u.company.allowed_pages if u.company else None,
             'staff_allowed_pages': u.allowed_pages,
+            'plain_password':      u.plain_password,
         })
     return Response(data)
 
