@@ -2484,5 +2484,4 @@ def stock_stats(request):
         'total_tracked': total,
         'in_stock':      in_stock,
         'low_stock':     low,
-        'out_of_stock':  out,
-    })
+        'out_of_stock':  out,   })
