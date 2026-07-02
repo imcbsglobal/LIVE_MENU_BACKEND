@@ -213,13 +213,11 @@ _WARM_TARGETS = [
     ('api.models.TVBanner',        None,  'id'),
 ]
 
-# Fields that hold file/image references — skip them during the warm copy so
-# we don't try to transfer binary content or get FileField path errors.
-_FILE_FIELDS = frozenset({
-    'image', 'logo', 'tv_logo', 'banner',
-    'tv_theme2_left', 'tv_theme2_right',
-    'tv_theme3_image', 'tv_theme3_video',
-})
+# FileField/ImageField columns only store a path/key string in the DB (the
+# actual binary lives in R2), so they're safe and cheap to copy into SQLite
+# like any other field. Kept as an empty set rather than removed outright,
+# in case a future field genuinely needs excluding.
+_FILE_FIELDS = frozenset()
 
 
 def warm_sqlite_cache() -> dict:
