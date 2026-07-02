@@ -17,13 +17,46 @@ from .models import BillingRecord
 from .models import SaleSession
 from .models import StockItem, StockLog  
 
+import os
+from urllib.parse import urlparse
+
+# Public Cloudflare R2 bucket settings (read from environment / .env)
+R2_PUBLIC_URL = os.environ.get('CLOUDFLARE_R2_PUBLIC_URL', '').rstrip('/')
+R2_BUCKET     = os.environ.get('CLOUDFLARE_R2_BUCKET', '')
 
 
 def _build_url(request, url):
+    """
+    Return a publicly accessible URL for a stored file.
+
+    Cloudflare R2's default `.url` points at the private S3-API endpoint
+    (https://<account>.r2.cloudflarestorage.com/...), which the browser
+    cannot read. This rewrites such links — and any local /media/ paths —
+    to the public r2.dev domain so images load on the frontend.
+    """
     if not url:
         return None
-    if url.startswith('http://') or url.startswith('https://'):
+
+    # Already a public r2.dev (or other CDN) link → use as-is
+    if R2_PUBLIC_URL and url.startswith(R2_PUBLIC_URL):
         return url
+
+    if url.startswith('http://') or url.startswith('https://'):
+        parsed = urlparse(url)
+        # Rewrite private S3-API / signed R2 links to the PUBLIC r2.dev domain
+        if R2_PUBLIC_URL and 'r2.cloudflarestorage.com' in parsed.netloc:
+            key = parsed.path.lstrip('/')                 # strips query string too
+            if R2_BUCKET and key.startswith(R2_BUCKET + '/'):
+                key = key[len(R2_BUCKET) + 1:]            # drop leading "<bucket>/"
+            return f"{R2_PUBLIC_URL}/{key}"
+        # Some other external/absolute URL → leave untouched
+        return url
+
+    # Relative path (e.g. /media/menu_items/x.jpg or menu_items/x.jpg)
+    if R2_PUBLIC_URL:
+        key = url.split('/media/')[-1].lstrip('/')
+        return f"{R2_PUBLIC_URL}/{key}"
+
     if request:
         return request.build_absolute_uri(url)
     return url
@@ -645,4 +678,4 @@ class StockLogSerializer(serializers.ModelSerializer):
             'note', 'date', 'billing_id',
             'created_at',
         ]
-        read_only_fields = ['id', 'created_at']        
+        read_only_fields = ['id', 'created_at']

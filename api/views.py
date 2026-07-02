@@ -177,6 +177,17 @@ class MenuItemViewSet(viewsets.ModelViewSet):
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         data = request.data.copy()
+
+        # Never wipe an existing image on save unless a NEW file is actually
+        # uploaded. The admin edit form often re-sends `image` as "" / "null" /
+        # the old URL string — all of which would otherwise clear the stored
+        # file and leave image = null. Only honour `image` when it is a real
+        # uploaded file object.
+        img = data.get('image', None)
+        is_new_file = hasattr(img, 'read')          # an uploaded file, not a string
+        if not is_new_file:
+            data.pop('image', None)                  # keep whatever is already saved
+
         serializer = self.get_serializer(instance, data=data, partial=partial)
         serializer.is_valid(raise_exception=True)
         menu_item = serializer.save()
